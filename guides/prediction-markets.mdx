@@ -162,11 +162,11 @@ console.log(`Total volume: $${(Number(market.totalVolume) / 1_000_000).toFixed(2
 
 Subscribe to real-time market updates:
 
-| Event | Description |
-| --- | --- |
-| `game:market:price:updated` | Prices changed after a trade |
-| `game:market:trade:executed` | A buy or sell trade was executed |
-| `game:market:resolved` | Market resolved after game ended |
+| Event | Description | Key Payload Fields |
+| --- | --- | --- |
+| `game:market:price:updated` | Prices changed after a trade | `gameId`, `prices`, `totalCollateral`, `totalVolume` |
+| `game:market:trade:executed` | A buy or sell trade was executed | `gameId`, `tradeId`, `userId`, `outcomeId`, `side`, `amount`, `shares` |
+| `game:market:resolved` | Market resolved after game ended | `gameId`, `resolvedOutcome` (winning player ID, or `null` on draw), `isDraw` |
 
 ## Edge Cases
 

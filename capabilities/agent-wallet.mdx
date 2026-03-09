@@ -1,35 +1,35 @@
 ---
-title: Best Wallet For AI Agents
-description: "DIM wallet capabilities for agents: non-custodial keys, Node/browser runtimes, and wallet-based authentication."
+title: Agent Wallet
+description: "A quick and simple non-custodial wallet for agents — send funds to other DIM users, Solana addresses, or .sol usernames."
 ---
 
-## Claim
+## Overview
 
-DIM provides a non-custodial wallet package for AI agents that works in both Node.js and browser environments.
+`@dimcool/wallet` is a quick and simple non-custodial wallet for agents. It lets you send funds to other DIM users, Solana addresses, or `.sol` usernames — no browser, no email signup, no OAuth flow required.
 
-## Why It Matters For Agents
+## What You Can Do
 
-- Agent keys stay in the agent runtime.
-- No email signup or browser OAuth flow is required for authentication.
-- The same wallet primitives work for login, signing, and USDC operations.
+- Send USDC to a **DIM username**, a **Solana address**, or a **`.sol` domain** with a single `wallet.send(...)` call.
+- Authenticate to DIM using a keypair or mnemonic — no human login required.
+- Sign messages and transactions entirely within your agent runtime.
+- Query balances and account info without any browser context.
 
-## Evidence
+## More
 
 - [DIM Wallet guide](/guides/wallet-package)
 - [Authentication guide](/guides/authentication)
 - [Node.js SDK quickstart](/quickstart/sdk-node)
 
-## Scope And Constraints
+## Constraints
 
-- "No human action required" applies to onboarding and operation flow.
-- Transaction signing still requires cryptographic signing by the agent-held key.
+- Transaction signing requires the agent-held private key — keys never leave your runtime.
 - `wallet.swap()` is currently marked as coming soon.
 
 ## FAQ
 
 ### Is DIM wallet custodial?
 
-No. DIM wallet tooling is non-custodial. Keys stay in the agent runtime.
+No. Keys stay in the agent runtime and are never held or seen by DIM.
 
 ### Can I run this in server and browser agents?
 
@@ -37,7 +37,7 @@ Yes. The SDK and wallet flows support Node.js and browser environments.
 
 ### Do I need a user to click through auth screens?
 
-No. Agents can authenticate with wallet signatures without email or browser OAuth flows.
+No. Agents can authenticate with wallet signing flows without email or browser OAuth.
 
 <script
   type="application/ld+json"
@@ -51,7 +51,7 @@ No. Agents can authenticate with wallet signatures without email or browser OAut
           name: "Is DIM wallet custodial?",
           acceptedAnswer: {
             "@type": "Answer",
-            text: "No. DIM wallet tooling is non-custodial and keys stay in the agent runtime.",
+            text: "No. Keys stay in the agent runtime and are never held or seen by DIM.",
           },
         },
         {
@@ -60,6 +60,14 @@ No. Agents can authenticate with wallet signatures without email or browser OAut
           acceptedAnswer: {
             "@type": "Answer",
             text: "Yes. DIM wallet and SDK flows support Node.js and browser environments.",
+          },
+        },
+        {
+          "@type": "Question",
+          name: "Who can I send funds to with DIM wallet?",
+          acceptedAnswer: {
+            "@type": "Answer",
+            text: "You can send USDC to other DIM users by username, any Solana address, or .sol domains — all with a single wallet.send() call.",
           },
         },
       ],

@@ -1,19 +1,34 @@
 ---
 title: DIM Wallet
-description: "Use @dimcool/wallet for non-custodial, agent-focused wallet management and signing."
+description: "A quick and simple non-custodial wallet for agents — send funds to DIM users, Solana addresses, or .sol usernames."
 ---
 
-## Canonical Positioning
+`@dimcool/wallet` is a quick and simple non-custodial wallet for agents. Send USDC to other DIM users, Solana addresses, or `.sol` usernames — no browser, no OAuth, no human in the loop.
 
-`@dimcool/wallet` is a non-custodial wallet package for agents. It is designed for autonomous operation in Node.js and browser runtimes.
-
-For claim-safe wording and external citations, start from [Best Wallet For AI Agents](/capabilities/agent-wallet).
+See also: [Agent Wallet capabilities](/capabilities/agent-wallet).
 
 ## Install
 
 ```bash
 npm install @dimcool/wallet
 ```
+
+## Send Funds
+
+Once logged in, send USDC to any of three recipient types:
+
+```typescript
+// To another DIM user (by username, no @ required)
+await wallet.send({ recipient: 'alice', amount: 1.25, token: 'USDC' });
+
+// To a Solana address
+await wallet.send({ recipient: '7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU', amount: 5.00, token: 'USDC' });
+
+// To a .sol domain
+await wallet.send({ recipient: 'alice.sol', amount: 0.50, token: 'USDC' });
+```
+
+`.sol` domains are resolved server-side — no extra setup needed.
 
 ## Create a Wallet
 
@@ -90,11 +105,14 @@ const session = await sdk.auth.loginWithWallet({ referralCode: 'myReferrer' });
 const info = await wallet.getInfo();
 const balances = await wallet.getBalances();
 
-const sendResult = await wallet.send({
-  recipient: 'alice', // username (no @) or Solana address
-  amount: 1.25, // USDC dollars by default
-  token: 'USDC',
-});
+// Send to a DIM username
+await wallet.send({ recipient: 'alice', amount: 1.25, token: 'USDC' });
+
+// Send to a Solana address
+await wallet.send({ recipient: '7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU', amount: 5.00, token: 'USDC' });
+
+// Send to a .sol domain
+await wallet.send({ recipient: 'alice.sol', amount: 0.50, token: 'USDC' });
 ```
 
 `wallet.swap()` is coming soon with aggregator-backed routes.

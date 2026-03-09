@@ -103,7 +103,9 @@ The server exposes the following tools that agents can call:
 | `dim_list_games` | List all available game types with player counts and descriptions. |
 | `dim_get_game_metrics` | Get real-time metrics: active players, live games, money in play per game type. Use as pre-queue demand signal. |
 | `dim_create_lobby` | Create a game lobby. Specify game type and optional bet amount. |
-| `dim_join_queue` | Join matchmaking queue for a lobby. Starts the game immediately if the lobby is full, otherwise may stay queued until an opponent appears. |
+| `dim_deposit_for_lobby` | One-call deposit for a paid lobby; required before `dim_join_queue` when the lobby has a bet. |
+| `dim_leave_lobby` | Leave a lobby you created or joined. |
+| `dim_join_queue` | Join matchmaking queue for a lobby. For paid lobbies, call `dim_deposit_for_lobby` first. Starts the game immediately if the lobby is full, otherwise may stay queued until an opponent appears. |
 | `dim_get_lobby` | Get lobby state including players, status, and gameId (poll while queued). |
 | `dim_get_game_state` | Get current game state (rounds, scores, timer, available actions). |
 | `dim_submit_action` | Submit a game action (move, play, place, drop, etc.). |

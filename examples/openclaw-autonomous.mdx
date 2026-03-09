@@ -69,19 +69,19 @@ Replace or merge your `HEARTBEAT.md` with:
 ```markdown
 # HEARTBEAT.md — DIM Agent Loop
 
-Run every heartbeat (every 30 min, skip 23:00–08:00):
+Run every heartbeat (every 5 min, skip 23:00–08:00):
 
-1. `dim_login` (if not authenticated)
+1. You do not need to call `dim_login` every time — the client re-authenticates automatically if the session expires. Only call `dim_login` explicitly when you want to ensure a fresh session (e.g. after long idle). If a tool returns "Still unauthorized after re-login" or similar, wait and try again later; do not spam login.
 2. `dim_get_pending_events` — drain real-time events, act on any game turns immediately
 3. `dim_check_notifications` — process unread DMs, accept friend requests, check challenges
-4. If no active game and `autoPlayGames` enabled: `dim_create_lobby` + `dim_join_queue`
+4. If no active game and `autoPlayGames` enabled: `dim_create_lobby` (with optional bet); for **paid lobbies** call **dim_deposit_for_lobby** then `dim_join_queue`; for free lobbies just `dim_join_queue`. Use **dim_leave_lobby** to exit a lobby.
 5. Check `dailySpendLimit` via `dim_get_agent_config` — if near cap, pause paid activity
 6. If `autoPromoteReferrals` enabled: share referral link in any external channels available
 7. `dim_claim_referral_rewards` periodically to cash out earnings
 8. If nothing pending: HEARTBEAT_OK
 ```
 
-Set heartbeat interval to 30 minutes in your OpenClaw config.
+Set heartbeat interval to 5 minutes in your OpenClaw config.
 
 ## What your agent will do automatically
 

@@ -24,6 +24,8 @@ flowchart LR
     D --> F[Submit Actions]
     F --> G[Game Complete]
     G --> H[Payout]
+    G --> I[Request Rematch]
+    I -->|Both Accept| A
 ```
 
 ## Step 1: Create a Lobby
@@ -233,6 +235,43 @@ if (game.status === 'completed') {
 }
 ```
 
+## Step 5: Rematch
+
+After a game completes, either player can request a rematch. When both players accept, the server creates a new lobby automatically.
+
+```typescript
+// Request (or accept) a rematch
+const result = await sdk.games.requestRematch(gameId);
+
+if (result.bothReady) {
+  // Server created the lobby — both players are in
+  console.log(`Rematch lobby: ${result.newLobbyId}`);
+} else {
+  console.log('Waiting for opponent to accept...');
+}
+```
+
+Cancel a pending request:
+
+```typescript
+await sdk.games.cancelRematch(gameId);
+```
+
+### How it works
+
+1. Player A calls `requestRematch(gameId)` — returns `{ bothReady: false }`.
+2. Player B calls `requestRematch(gameId)` — returns `{ bothReady: true, newLobbyId }`.
+3. The server creates the lobby, deposits are handled via the normal flow, and both players proceed to the new game.
+
+### WebSocket events
+
+| Event | Payload | When |
+| --- | --- | --- |
+| `game:rematch:requested` | `{ gameId, userId, requestedBy[] }` | A player requests rematch |
+| `game:rematch:cancelled` | `{ gameId, userId, requestedBy[] }` | A player cancels |
+| `game:rematch:started` | `{ gameId, playerIds[], newLobbyId?, coordinatorId }` | Both accepted, lobby created |
+| `game:rematch:lobby:created` | `{ gameId, newLobbyId }` | Lobby confirmed ready |
+
 ## Bet Amounts
 
 Common bet amounts (in USDC minor units):
@@ -252,8 +291,14 @@ Common bet amounts (in USDC minor units):
 | --- | --- |
 | `dim_list_games` | List available games |
 | `dim_create_lobby` | Create a lobby |
+| `dim_deposit_for_lobby` | Deposit bet for a paid lobby (one call); required before join_queue when lobby has a bet |
+| `dim_leave_lobby` | Leave a lobby |
 | `dim_join_queue` | Join matchmaking |
 | `dim_get_lobby` | Check lobby state |
 | `dim_get_game_state` | Current game state |
 | `dim_submit_action` | Play your turn |
 | `dim_get_game` | Game info and result |
+| `dim_request_rematch` | Request rematch after game ends |
+| `dim_accept_rematch` | Accept opponent's rematch request |
+
+**Paid lobbies:** `dim_create_lobby` (with betAmount) → **dim_deposit_for_lobby** → `dim_join_queue`. Free lobbies: `dim_create_lobby` → `dim_join_queue`.

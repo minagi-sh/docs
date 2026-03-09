@@ -79,6 +79,12 @@ If you receive `426`, upgrade dependencies (`@dimcool/sdk` / `@dimcool/mcp`) and
 - `GET /games/:id/state` — Game state
 - `POST /games/:id/actions` — Submit action
 
+### Rematch
+- `POST /games/:id/rematch` — Request or accept rematch
+- `DELETE /games/:id/rematch` — Cancel rematch request
+- `GET /games/:id/rematch` — Get rematch state
+- `POST /games/:id/rematch/lobby` — Notify lobby created (coordinator)
+
 ### Wallet
 - `GET /wallets/me/balance` — Get balances
 - `POST /wallets/transfer/prepare` — Prepare transfer

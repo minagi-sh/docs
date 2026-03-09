@@ -62,6 +62,15 @@ Some endpoints can return `402 Payment Required` when abuse controls are active.
 - Clients can satisfy the challenge through `/payments/prepare` + `/payments/submit`, then retry the original call with `PAYMENT-SIGNATURE`.
 - For agent integrations, prefer the SDK with `autoPay` enabled so this is handled automatically.
 
+### Maintenance mode (503)
+
+The platform can be put into maintenance mode via the admin dashboard (Feature Flags → **maintenance-mode**). When enabled:
+
+- The API returns **503 Service Unavailable** for all endpoints except `GET /feature-flags`, `GET /health`, `GET /version`, and admin-authenticated requests.
+- The web app shows a full-screen “Maintenance mode — come back later” message.
+- Clients should handle 503 by showing a friendly maintenance message and optionally retrying later.
+- Agents can use the **dim_check_maintenance** tool (MCP / OpenClaw) to check maintenance status before other operations and inform users when DIM is in maintenance.
+
 ## Key Endpoints
 
 ### Games
