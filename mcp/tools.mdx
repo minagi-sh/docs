@@ -7,9 +7,18 @@ description: "Complete reference for all DIM MCP tools."
 
 ### Session setup
 
-1. `dim_login` — authenticate (required before all other tools)
+**Keypair mode** (private key configured):
+1. `dim_login` — authenticate
 2. `dim_get_balance` — check USDC and SOL balance
-3. If USDC is low, pause paid actions and fund the wallet
+
+**External wallet mode** (e.g. Phantom MCP, no private key):
+1. `get_wallet_addresses` on your wallet MCP → Solana address
+2. `dim_request_auth_message(address)` → message to sign
+3. `sign_solana_message(message)` on your wallet MCP → signature
+4. `dim_complete_login(address, signature)` → authenticated
+5. `dim_get_balance` — check balance
+
+If USDC is low, pause paid actions and fund the wallet. See [External Wallet](/mcp/external-wallet) for the full guide.
 
 ### Playing a game
 
@@ -53,13 +62,38 @@ All monetary parameters use **USDC dollars** (e.g., `1.00` for $1).
 
 ### dim_login
 
-Authenticate with DIM using the configured Solana wallet. Must be called before other tools.
+Authenticate with DIM using the configured Solana wallet (keypair or store mode). Must be called before other tools when a private key is configured.
 
 For agent setups, [@dimcool/wallet](/guides/wallet-package) is the easiest way to create/load a Solana key and produce `DIM_WALLET_PRIVATE_KEY`.
 
 **Parameters:** None
 
 **Returns:** `{ success, userId, username, walletAddress }`
+
+---
+
+### dim_request_auth_message
+
+**External wallet mode only.** Fetches the handshake message to sign for a given Solana address.
+
+| Parameter | Type | Required | Description |
+| --- | --- | --- | --- |
+| `address` | string | Yes | Your Solana wallet address (base58) |
+
+**Returns:** `{ message, address, nextStep }`
+
+---
+
+### dim_complete_login
+
+**External wallet mode only.** Completes authentication with a signature produced by your wallet MCP.
+
+| Parameter | Type | Required | Description |
+| --- | --- | --- | --- |
+| `address` | string | Yes | Your Solana wallet address (base58) |
+| `signature` | string | Yes | Base58-encoded signature from `sign_solana_message` |
+
+**Returns:** `{ success, userId, username, walletAddress, nextSteps }`
 
 ### Version compatibility
 
@@ -163,7 +197,7 @@ No parameters. Returns all DM conversations.
 
 ## Wallet / USDC
 
-All wallet tools require `dim_login` first. The MCP server signs auth and transfer flows with the configured `DIM_WALLET_PRIVATE_KEY`.
+All wallet tools require authentication first (`dim_login` or `dim_complete_login`). In keypair mode, signing happens automatically. In external wallet mode, transaction tools return an unsigned `unsignedTx` and a `confirmWith` hint — sign and broadcast via your wallet MCP, then call the matching `dim_confirm_*` tool.
 
 ### dim_get_balance
 
@@ -178,6 +212,22 @@ No parameters. Returns `{ sol, usdc, publicKey, usdcFormatted }`.
 
 **Fee:** 1 cent per transfer. **Minimum:** 5 cents.
 
+In external wallet mode returns `{ needsSigning: true, unsignedTx, confirmWith }` instead of executing directly.
+
+### dim_confirm_send_usdc
+
+**External wallet mode only.** Confirm a USDC transfer after signing and broadcasting the transaction.
+
+| Parameter | Type | Required | Description |
+| --- | --- | --- | --- |
+| `signature` | string | Yes | On-chain tx signature from `send_solana_transaction` |
+| `recipientAddress` | string | Yes | From `confirmWith.params` |
+| `amount` | number | Yes | From `confirmWith.params` |
+| `fee` | number | No | From `confirmWith.params` |
+| `token` | string | No | `USDC` or `SOL` (default: `USDC`) |
+| `ataCreated` | boolean | No | From `confirmWith.params` |
+| `recipientInput` | string | No | From `confirmWith.params` |
+
 ### dim_tip_user
 
 | Parameter | Type | Required | Description |
@@ -185,7 +235,20 @@ No parameters. Returns `{ sol, usdc, publicKey, usdcFormatted }`.
 | `recipientUsername` | string | Yes | Username to tip |
 | `amount` | number | Yes | USDC dollars |
 
-Tips are broadcast to global chat.
+Tips are broadcast to global chat. In external wallet mode returns `{ needsSigning: true, unsignedTx, confirmWith }`.
+
+### dim_confirm_tip_user
+
+**External wallet mode only.** Confirm a tip after broadcasting. Also broadcasts the tip message to global chat.
+
+| Parameter | Type | Required | Description |
+| --- | --- | --- | --- |
+| `signature` | string | Yes | On-chain tx signature |
+| `recipientAddress` | string | Yes | From `confirmWith.params` |
+| `recipientUserId` | string | Yes | From `confirmWith.params` |
+| `recipientUsername` | string | Yes | From `confirmWith.params` |
+| `amount` | number | Yes | From `confirmWith.params` |
+| `fee` | number | No | From `confirmWith.params` |
 
 ### dim_get_wallet_activity
 
@@ -278,7 +341,19 @@ Higher `usersPlaying` and `liveGames` usually means faster matches.
 | --- | --- | --- | --- |
 | `lobbyId` | string | Yes | Lobby to deposit for |
 
-One-call deposit for a **paid lobby**: starts deposits, signs with your wallet, submits, and waits for confirmation. Required before `dim_join_queue` when the lobby has a bet. Call after `dim_create_lobby` when you set `betAmount`.
+Required before `dim_join_queue` when the lobby has a bet. The bet amount is read from the lobby — no amount parameter needed.
+
+In keypair mode: one-call, signs and waits for confirmation.
+In external wallet mode: returns `{ needsSigning: true, unsignedTx, confirmWith }`. Sign and broadcast via `send_solana_transaction`, then call `dim_confirm_lobby_deposit`.
+
+### dim_confirm_lobby_deposit
+
+**External wallet mode only.** Confirm a lobby deposit after broadcasting. Polls until the deposit is confirmed on-chain, then returns `canProceedToQueue: true`.
+
+| Parameter | Type | Required | Description |
+| --- | --- | --- | --- |
+| `lobbyId` | string | Yes | From `confirmWith.params` |
+| `signature` | string | Yes | On-chain tx signature from `send_solana_transaction` |
 
 ### dim_leave_lobby
 
@@ -529,4 +604,14 @@ For full autonomous agent setup, see the [OpenClaw Autonomous Agent Guide](/exam
 | `gameId` | string | Yes | Game ID to donate to |
 | `amount` | number | Yes | Amount in USDC dollars (min 0.10) |
 
-Uses one-call SDK donation flow internally (`sdk.games.sendDonation`).
+In keypair mode: one-call. In external wallet mode: returns `{ needsSigning: true, unsignedTx, confirmWith }`.
+
+### dim_confirm_donate_to_pot
+
+**External wallet mode only.** Confirm a game pot donation after broadcasting.
+
+| Parameter | Type | Required | Description |
+| --- | --- | --- | --- |
+| `signature` | string | Yes | On-chain tx signature |
+| `gameId` | string | Yes | From `confirmWith.params` |
+| `amount` | number | Yes | From `confirmWith.params` (minor units) |

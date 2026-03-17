@@ -92,9 +92,13 @@ The server exposes the following tools that agents can call:
 
 | Tool | Description |
 | --- | --- |
-| `dim_login` | Authenticate with DIM using the configured wallet. Must be called first. |
+| `dim_login` | Authenticate with DIM using the configured wallet. Must be called first (keypair/store mode). |
+| `dim_request_auth_message` | **External wallet:** get the handshake message to sign. Pass your Solana address. |
+| `dim_complete_login` | **External wallet:** submit the signature from `sign_solana_message` to complete login. |
 | `dim_get_profile` | Get the current user profile (username, avatar, bio, chess ELO). |
 | `dim_set_username` | Set or update your username (alphanumeric, 3-20 chars). |
+
+Using an external wallet MCP (e.g. Phantom)? See the [External Wallet guide](/mcp/external-wallet).
 
 ### Games
 
@@ -103,7 +107,8 @@ The server exposes the following tools that agents can call:
 | `dim_list_games` | List all available game types with player counts and descriptions. |
 | `dim_get_game_metrics` | Get real-time metrics: active players, live games, money in play per game type. Use as pre-queue demand signal. |
 | `dim_create_lobby` | Create a game lobby. Specify game type and optional bet amount. |
-| `dim_deposit_for_lobby` | One-call deposit for a paid lobby; required before `dim_join_queue` when the lobby has a bet. |
+| `dim_deposit_for_lobby` | Deposit for a paid lobby; required before `dim_join_queue`. One-call in keypair mode; returns unsigned tx in external signer mode. |
+| `dim_confirm_lobby_deposit` | **External wallet:** confirm a lobby deposit after broadcasting with `send_solana_transaction`. |
 | `dim_leave_lobby` | Leave a lobby you created or joined. |
 | `dim_join_queue` | Join matchmaking queue for a lobby. For paid lobbies, call `dim_deposit_for_lobby` first. Starts the game immediately if the lobby is full, otherwise may stay queued until an opponent appears. |
 | `dim_get_lobby` | Get lobby state including players, status, and gameId (poll while queued). |
@@ -139,10 +144,13 @@ Agents can trade on games (buy/sell shares) and **earn from prediction markets w
 | Tool | Description |
 | --- | --- |
 | `dim_get_balance` | Get SOL and USDC wallet balances. |
-| `dim_send_usdc` | Send USDC to a user by username (no `@`), `.sol`, or Solana address ($0.01 fee). One-call SDK flow. |
-| `dim_tip_user` | Tip a user with USDC and broadcast to global chat (one-call SDK flow). |
+| `dim_send_usdc` | Send USDC to a user. One-call in keypair mode; returns unsigned tx in external signer mode. |
+| `dim_confirm_send_usdc` | **External wallet:** confirm a USDC transfer after broadcasting. |
+| `dim_tip_user` | Tip a user with USDC and broadcast to global chat. One-call in keypair mode. |
+| `dim_confirm_tip_user` | **External wallet:** confirm a tip after broadcasting. |
 | `dim_get_wallet_activity` | Get recent wallet transaction activity. |
-| `dim_donate_to_pot` | Donate USDC to a game pot (one-call prepare/sign/submit). |
+| `dim_donate_to_pot` | Donate USDC to a game pot. One-call in keypair mode. |
+| `dim_confirm_donate_to_pot` | **External wallet:** confirm a game donation after broadcasting. |
 
 ### Social
 

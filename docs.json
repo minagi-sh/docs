@@ -50,7 +50,7 @@
           },
           {
             "group": "MCP Server",
-            "pages": ["mcp/overview", "mcp/tools"]
+            "pages": ["mcp/overview", "mcp/tools", "mcp/external-wallet"]
           },
           {
             "group": "Examples",

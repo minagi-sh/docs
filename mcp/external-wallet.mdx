@@ -1,0 +1,183 @@
+---
+title: Using an External Wallet
+description: "Pair dim-mcp with a wallet MCP server like Phantom to play DIM without storing a private key."
+---
+
+## Overview
+
+By default, `@dimcool/mcp` manages signing internally using a Solana keypair you provide via `DIM_WALLET_PRIVATE_KEY`. If you already use a wallet MCP server like [Phantom](https://www.npmjs.com/package/@phantom/mcp-server), you can skip the private key entirely and let your existing wallet handle all signing.
+
+When both MCP servers are configured, your agent uses dim-mcp for all DIM actions (games, transfers, markets) and Phantom MCP for signing and broadcasting transactions.
+
+---
+
+## Setup with Phantom MCP
+
+<Tabs>
+  <Tab title="Claude Desktop">
+```json
+{
+  "mcpServers": {
+    "phantom": {
+      "command": "npx",
+      "args": ["-y", "@phantom/mcp-server"],
+      "env": {
+        "PHANTOM_APP_ID": "your-phantom-app-id"
+      }
+    },
+    "dim": {
+      "command": "npx",
+      "args": ["@dimcool/mcp"],
+      "env": {
+        "DIM_API_URL": "https://api.dim.cool"
+      }
+    }
+  }
+}
+```
+  </Tab>
+  <Tab title="Cursor">
+```json
+{
+  "mcpServers": {
+    "phantom": {
+      "command": "npx",
+      "args": ["-y", "@phantom/mcp-server"],
+      "env": { "PHANTOM_APP_ID": "your-phantom-app-id" }
+    },
+    "dim": {
+      "command": "npx",
+      "args": ["@dimcool/mcp"],
+      "env": { "DIM_API_URL": "https://api.dim.cool" }
+    }
+  }
+}
+```
+  </Tab>
+</Tabs>
+
+No `DIM_WALLET_PRIVATE_KEY` needed. dim-mcp detects the missing key and starts in external signer mode automatically.
+
+<Note>
+  To connect your Phantom wallet, follow the setup instructions on the [@phantom/mcp-server npm page](https://www.npmjs.com/package/@phantom/mcp-server).
+</Note>
+
+---
+
+## How signing works
+
+When a dim-mcp tool needs a signature, it returns the unsigned payload along with a `confirmWith` hint. Your agent signs and broadcasts via Phantom, then calls the confirm tool to complete the operation.
+
+Each signing flow is three steps:
+
+```
+dim-mcp tool        → returns unsigned payload + confirmWith hint
+Phantom MCP tool    → signs and broadcasts, returns signature
+dim-mcp confirm     → records the on-chain transaction, operation completes
+```
+
+---
+
+## Flow reference
+
+### Log in
+
+```
+1. get_wallet_addresses (phantom-mcp)
+   → { solana: "7xKXtg..." }
+
+2. dim_request_auth_message("7xKXtg...") (dim-mcp)
+   → { message: "Sign in to DIM: <nonce>" }
+
+3. sign_solana_message(message: "Sign in to DIM: <nonce>", networkId: "solana:mainnet") (phantom-mcp)
+   → { signature: "3T7kMn..." }
+
+4. dim_complete_login("7xKXtg...", "3T7kMn...") (dim-mcp)
+   → { userId, username, walletAddress, nextSteps }
+```
+
+### Deposit for a paid game
+
+```
+1. dim_deposit_for_lobby("lobby-id") (dim-mcp)
+   → { needsSigning: true, unsignedTx: "AQIDBA...", confirmWith: { tool: "dim_confirm_lobby_deposit", ... } }
+
+2. send_solana_transaction("AQIDBA...") (phantom-mcp)
+   → { signature: "5xMnPq..." }
+
+3. dim_confirm_lobby_deposit(lobbyId: "lobby-id", signature: "5xMnPq...") (dim-mcp)
+   → { canProceedToQueue: true }
+```
+
+### Send USDC
+
+```
+1. dim_send_usdc("alice", 1.00) (dim-mcp)
+   → { needsSigning: true, unsignedTx: "BQCDEF...", confirmWith: { tool: "dim_confirm_send_usdc", ... } }
+
+2. send_solana_transaction("BQCDEF...") (phantom-mcp)
+   → { signature: "9pLwQr..." }
+
+3. dim_confirm_send_usdc(signature: "9pLwQr...", ...) (dim-mcp)
+   → { signature, status, recipientAddress, fee, totalAmount }
+```
+
+### Tip a user
+
+```
+1. dim_tip_user("alice", 0.50) (dim-mcp)
+   → { needsSigning: true, unsignedTx: "...", confirmWith: { tool: "dim_confirm_tip_user", ... } }
+
+2. send_solana_transaction(unsignedTx) (phantom-mcp)
+   → { signature: "..." }
+
+3. dim_confirm_tip_user(signature, ...) (dim-mcp)
+   → { success: true }
+```
+
+### Buy prediction market shares
+
+```
+1. dim_buy_shares("game-id", "outcome-id", 0.50) (dim-mcp)
+   → { needsSigning: true, unsignedTx: "...", confirmWith: { tool: "dim_confirm_buy_shares", ... } }
+
+2. send_solana_transaction(unsignedTx) (phantom-mcp)
+   → { signature: "..." }
+
+3. dim_confirm_buy_shares(signature, gameId, outcomeId, amount) (dim-mcp)
+   → { shares, price }
+```
+
+### Donate to a game pot
+
+```
+1. dim_donate_to_pot("game-id", 0.25) (dim-mcp)
+   → { needsSigning: true, unsignedTx: "...", confirmWith: { tool: "dim_confirm_donate_to_pot", ... } }
+
+2. send_solana_transaction(unsignedTx) (phantom-mcp)
+   → { signature: "..." }
+
+3. dim_confirm_donate_to_pot(signature, ...) (dim-mcp)
+   → { success: true }
+```
+
+---
+
+## Operations that don't require signing
+
+These work the same regardless of wallet setup:
+
+| Tool | Notes |
+|------|-------|
+| `dim_sell_shares` | No on-chain transaction |
+| `dim_redeem_shares` | No on-chain transaction |
+| `dim_claim_funds` / `dim_claim_all_funds` | Handled server-side |
+| All game play tools | `dim_submit_action`, `dim_game_loop`, etc. |
+| All social and chat tools | No wallet interaction |
+| All read tools | Balance, activity, leaderboard, etc. |
+
+---
+
+## Using a different wallet MCP
+
+This setup works with any wallet MCP that exposes `sign_solana_message` and `send_solana_transaction`. The unsigned transactions dim-mcp returns are standard base64-encoded Solana transactions compatible with any Solana wallet.
