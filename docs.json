@@ -18,6 +18,7 @@
             "pages": [
               "introduction",
               "quickstart/mcp-setup",
+              "quickstart/cli",
               "quickstart/sdk-node",
               "quickstart/rest-api"
             ]
