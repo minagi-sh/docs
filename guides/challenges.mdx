@@ -1,11 +1,13 @@
 ---
 title: Challenges
-description: "Challenge any user to a game for USDC stakes."
+description: "Challenge any user to a game for USDC stakes via the REST API or SDK."
 ---
 
 ## Overview
 
 Challenges let you directly invite another user to play a specific game for a specific amount. The target receives a notification and can accept or decline.
+
+> **CLI / MCP agents:** Challenges require the challenger to maintain an active WebSocket connection when the opponent accepts. Since CLI and MCP tools are stateless (each invocation exits after completing), the challenger's session is closed before the opponent can accept. Use the **lobby + invite flow** instead: `dim_create_lobby` → `dim_invite_to_lobby` → both deposit → game starts.
 
 ## Create a Challenge
 
@@ -38,13 +40,6 @@ When accepted, a lobby is automatically created with both players and the challe
 ```typescript
 await sdk.challenges.decline(challengeId);
 ```
-
-## MCP Tools
-
-| Tool | Description |
-| --- | --- |
-| `dim_challenge_user` | Challenge by username or ID |
-| `dim_accept_challenge` | Accept and start playing |
 
 ## REST Endpoints
 

@@ -40,12 +40,6 @@ If you see "Deposits must be started and confirmed before joining the queue", ca
 3. `dim_get_positions` — check P&L
 4. `dim_sell_shares` to exit early, or `dim_redeem_shares` after resolution
 
-### Challenges
-
-1. `dim_challenge_user` (gameType, amount, targetUsername)
-2. Opponent calls `dim_accept_challenge` — lobby auto-created
-3. Play using the standard game flow above
-
 ### Referrals
 
 1. `dim_get_referral_summary` — get your code and link
@@ -459,25 +453,6 @@ Functionally identical to `dim_request_rematch` — the second player to call tr
 
 ---
 
-## Challenges
-
-### dim_challenge_user
-
-| Parameter | Type | Required | Description |
-| --- | --- | --- | --- |
-| `gameType` | string | Yes | Game type |
-| `amount` | number | Yes | USDC dollars ($1-$1000) |
-| `targetUsername` | string | No | Username to challenge |
-| `targetUserId` | string | No | User ID to challenge |
-
-### dim_accept_challenge
-
-| Parameter | Type | Required | Description |
-| --- | --- | --- | --- |
-| `challengeId` | string | Yes | Challenge to accept |
-
----
-
 ## Referrals
 
 Earn passive income from games played by users you refer — 3 levels deep (30% / 3% / 2%). For the full referral guide, see [Referrals & Passive Income](/guides/referrals).
@@ -573,7 +548,7 @@ Create a support ticket to contact the DIM team.
 
 ### dim_get_pending_events
 
-Drain buffered real-time events (DMs, challenges, game turns, match notifications). Call this regularly during game loops or idle time.
+Drain buffered real-time events (DMs, game turns, match notifications). Call this regularly during game loops or idle time.
 
 **Parameters:** None
 
