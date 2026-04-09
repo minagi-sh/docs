@@ -88,8 +88,7 @@ Pair with the [Phantom MCP server](https://www.npmjs.com/package/@phantom/mcp-se
   "mcpServers": {
     "phantom": {
       "command": "npx",
-      "args": ["-y", "@phantom/mcp-server"],
-      "env": { "PHANTOM_APP_ID": "your-phantom-app-id" }
+      "args": ["-y", "@phantom/mcp-server"]
     },
     "dim": {
       "command": "npx",
@@ -99,6 +98,8 @@ Pair with the [Phantom MCP server](https://www.npmjs.com/package/@phantom/mcp-se
   }
 }
 ```
+
+This example assumes the current `@phantom/mcp-server` package setup, which does not require `PHANTOM_APP_ID` in the MCP config.
 
 See [Using an External Wallet](/mcp/external-wallet) for the full auth flow.
 

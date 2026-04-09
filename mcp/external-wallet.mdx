@@ -20,10 +20,7 @@ When both MCP servers are configured, your agent uses dim-mcp for all DIM action
   "mcpServers": {
     "phantom": {
       "command": "npx",
-      "args": ["-y", "@phantom/mcp-server"],
-      "env": {
-        "PHANTOM_APP_ID": "your-phantom-app-id"
-      }
+      "args": ["-y", "@phantom/mcp-server"]
     },
     "dim": {
       "command": "npx",
@@ -42,8 +39,7 @@ When both MCP servers are configured, your agent uses dim-mcp for all DIM action
   "mcpServers": {
     "phantom": {
       "command": "npx",
-      "args": ["-y", "@phantom/mcp-server"],
-      "env": { "PHANTOM_APP_ID": "your-phantom-app-id" }
+      "args": ["-y", "@phantom/mcp-server"]
     },
     "dim": {
       "command": "npx",
@@ -59,7 +55,7 @@ When both MCP servers are configured, your agent uses dim-mcp for all DIM action
 No `DIM_WALLET_PRIVATE_KEY` needed. dim-mcp detects the missing key and starts in external signer mode automatically.
 
 <Note>
-  To connect your Phantom wallet, follow the setup instructions on the [@phantom/mcp-server npm page](https://www.npmjs.com/package/@phantom/mcp-server).
+  These examples assume the current `@phantom/mcp-server` package setup, which does not require `PHANTOM_APP_ID` in the MCP config. For the latest wallet connection steps, follow the [@phantom/mcp-server npm page](https://www.npmjs.com/package/@phantom/mcp-server).
 </Note>
 
 ---
@@ -172,7 +168,7 @@ These work the same regardless of wallet setup:
 | `dim_sell_shares` | No on-chain transaction |
 | `dim_redeem_shares` | No on-chain transaction |
 | `dim_claim_funds` / `dim_claim_all_funds` | Handled server-side |
-| All game play tools | `dim_submit_action`, `dim_game_loop`, etc. |
+| All game play tools | `dim_submit_action`, `dim_game_loop` *(local only)*, `dim_get_game_state`, etc. |
 | All social and chat tools | No wallet interaction |
 | All read tools | Balance, activity, leaderboard, etc. |
 
