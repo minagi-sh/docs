@@ -1,0 +1,200 @@
+---
+title: 'Market data'
+description: 'Live market prices on DIM: a chain-agnostic market registry, the latest price of one or hundreds of markets, a sub-second tick stream and watch lists over the socket, candles that page back as far as you scroll, and the perp marks every perps screen quotes on.'
+---
+
+## Overview
+
+The **prices** area feeds every part of DIM that needs a market price: the token page chart, holdings revalued live, and the perps' marks. It is chain-agnostic: a market is identified by what it is, never by where its price comes from, so a source can change without breaking a chart.
+
+| Market id                 | What it is                                                | Source                                                |
+| ------------------------- | --------------------------------------------------------- | ----------------------------------------------------- |
+| `spot:BTC-USD`            | An off-chain spot pair                                    | Binance public trade stream (sub-second) and klines   |
+| `solana:<mint>`           | A Solana token (`solana:native` is SOL)                   | Jupiter price polling (1 s) and GeckoTerminal history |
+| `evm:<chainId>:<address>` | An EVM token (`evm:<chainId>:native` is the chain's coin) | Reserved; used as holdings ids                        |
+| `perp:<COIN>`             | A perpetual future on the perps venue                     | Hyperliquid public mids, polled                       |
+
+**`perp:<COIN>` market ids are the perps' marks**: `perp:SOL`, `perp:kBONK` (coins case-sensitive, exactly as `GET /perps/markets` spells them) are what [perps](/guides/perps) quote, chart and liquidate on. A perp market is served in `PerpMarket.marketId`, and the SDK's `perpMarketId('SOL')` builds it.
+
+Every market describes its **feed**: the provider, whether prices are streamed or polled, the nominal update interval, whether ticks carry the provider's own timestamp, the finest candle resolution and whether history is available.
+
+<Note>
+  Pyth is wired as a third provider but stays disabled until `PYTH_API_KEY` is
+  set. Since the August 2026 Pyth Core upgrade Hermes requires a key, and
+  sub-second updates need the paid Pro plan.
+</Note>
+
+## Market registry
+
+Known markets live in the database, seeded with the allowlisted pairs (`spot:BTC-USD`, `spot:ETH-USD`, `spot:SOL-USD`, wrapped SOL). Any well-formed id that is not known yet is resolved through the providers the first time someone asks for it and stored, so long-tail Solana tokens register themselves when their chart is opened.
+
+`GET /prices/markets?q=&provider=&assetType=&limit=` lists known markets, allowlisted first (`limit` 1–50, default 20); `q` also searches the providers; `provider` is `binance`, `jupiter`, `pyth` or `hyperliquid`; `assetType` is `crypto`, `equity`, `fx`, `commodity` or `other`. `GET /prices/markets/:id` answers one market.
+
+```typescript
+const markets = await sdk.prices.listMarkets({ q: 'sol' });
+// [{ id, kind, chain, symbol, base, quote, name, icon, assetType, providerRef, decimals, allowlisted,
+//    feed: { provider, kind, updateIntervalMs, tickTimestamps, minResolution, history },
+//    status: 'live' | 'stale' | 'offline' | 'idle', latest: PriceTick | null }]
+
+const btc = await sdk.prices.getMarket('spot:BTC-USD');
+const solPerp = await sdk.prices.getMarket('perp:SOL');
+```
+
+`status` folds three things together: `idle` means nobody is ingesting the market right now (no subscriber, no watch list, not allowlisted), `stale` and `offline` come from the provider or from tick freshness, and `live` means ticks are flowing.
+
+## Latest price
+
+- `GET /prices/markets/:id/latest` answers `{ marketId, status, statusReason, tick, serverTs }` for one market.
+- `POST /prices/latest` with `{ ids: string[] }` (up to 200) answers `{ items: { [id]: { marketId, status, statusReason, tick | null } }, serverTs }` from what Redis already holds. Ids nobody ingests come back `idle` with no tick, and nothing is registered or fetched on their behalf. A POST because 200 ids do not fit a URL.
+
+```bash
+curl -X POST https://api.dim.cool/prices/latest \
+  -H 'Content-Type: application/json' \
+  -d '{"ids":["spot:BTC-USD","perp:SOL","solana:native"]}'
+```
+
+## Realtime ticks
+
+A tick is one price observation:
+
+```typescript
+interface PriceTick {
+  marketId: string;
+  seq: number; // strictly increasing per market; dedupe and order by it
+  ts: number; // provider time in ms (ingest time for polled feeds)
+  ingestTs: number; // when DIM saw it
+  price: number;
+  priceRaw: string; // the provider's exact decimal string
+  conf: number | null;
+  source: 'stream' | 'poll';
+}
+```
+
+One API instance ingests every market with demand (the allowlist, markets with socket subscribers, markets on a watch list, the perps' listed marks while perps are on) and writes each tick to a Redis hot window of the last 15 minutes, publishing it to every other instance. "The price at instant T" is deterministic everywhere: the last tick at or before T, falling back to the close of the last 1-second candle, never a tick after T and never an extrapolation.
+
+Over the socket (the same Socket.IO connection as the rest of the API, signed in), emit `join-price` with the raw market id (`leave-price` to stop; at most 10 markets per socket) and receive in the `price:<marketId>` room:
+
+| Event          | Payload                                                                     |
+| -------------- | --------------------------------------------------------------------------- |
+| `price:tick`   | `PriceTick & { _serverTs }`, coalesced to a few emits per second per market |
+| `price:status` | `{ marketId, status, reason, asOf }` on transitions only                    |
+| `price:candle` | `{ marketId, resolution: '1s', candle }` when a 1-second candle closes      |
+
+On join the server sends the current status and the latest tick to the joining socket only. Everything else is HTTP first: warm up with `/ticks`, then stream, then gap-fill with `sinceSeq` after a reconnect. `GET /prices/markets/:id/ticks?seconds=|sinceTs=|sinceSeq=&limit=` reads the hot window oldest first (`seconds` up to 900, default 60; `limit` up to 5,000, default 2,000) with `truncated: true` when the gap asked for is older than the window.
+
+```typescript
+// High level: a shared session per market with warm-up, dedupe and gap-fill
+const leave = await sdk.prices.openPriceSession('perp:SOL');
+const live = sdk.prices.observeLivePrice('perp:SOL');
+live.subscribe(() => {
+  const { latest, ticks, status, connected } = live.getSnapshot();
+});
+leave();
+
+// Low level
+const unsubscribe = sdk.prices.subscribeTick('spot:BTC-USD', (tick) => {});
+const leaveRoom = sdk.prices.joinMarket('spot:BTC-USD');
+```
+
+## Many markets at once: watch lists
+
+A portfolio or a token list needs the latest price of hundreds of markets, not a tick stream per market. Over the socket, `watch-prices` with `{ ids: string[] }` **replaces** the socket's watch list (up to 500 markets). The server answers with one `prices:update` snapshot for the ids just added, then one `prices:update` per second at most carrying the latest tick of every watched market that moved and any status changes: `{ ticks: PriceTick[], statuses: PriceStatusEvent[], snapshot?: true, _serverTs }`.
+
+Watched markets are ingested on the **slow tier**: markets that only watch lists hold are polled every `PRICES_PORTFOLIO_POLL_MS` (10 s) instead of every second, their ticks are not rolled into candles, and `stale` is judged against that interval. A chart, the allowlist or the perps listing on the same market lifts it back to the fast tier. The Jupiter poller spends at most `PRICES_JUPITER_MAX_RPS` requests per second (50 mints each); fast-tier markets always go first, so when demand exceeds the budget it is the slow tier that stretches.
+
+```typescript
+const many = await sdk.prices.getLatestMany(['spot:BTC-USD', 'solana:<mint>']); // chunks of 200 for you
+
+// A shared watch session: one list on the socket, one batch per second, a REST read on open and reconnect
+const close = await sdk.prices.openWatchSession(ids);
+const quotes = sdk.prices.observeLivePrices(ids); // { quotes: { [id]: { tick, status, statusReason } }, connected, loading, error }
+close();
+```
+
+Holdings use this under the hood: `sdk.trade.observeHoldings(userId | 'me')` revalues a wallet as its tokens' prices move ([Spot tokens and holdings](/guides/trading#holdings)).
+
+## Candles and history
+
+Candles are served from DIM's own store: 1-second candles rolled up from the tick window (kept 48 hours), 1-minute and 1-hour rollups (kept 400 days and forever), and 5m / 15m / 4h / 1d aggregated on read. Ranges older than what DIM has ingested are backfilled from the provider one page per request and stored, so a chart that scrolls into last year fetches each page from the provider once.
+
+`GET /prices/markets/:id/candles?resolution=&from=&to=&range=&limit=`: `resolution` is `1s`, `1m`, `5m`, `15m`, `1h`, `4h` or `1d`; `from` and `to` are unix seconds (`from` before `to`); `range` is a preset (`24h` → 1m, `7d` → 15m, `1m` → 1h, `1y` → 4h, `all` → 1d); `limit` is 1–1,000 (default 500).
+
+```typescript
+// A chart preset
+const page = await sdk.prices.getCandles('spot:BTC-USD', { range: '24h' });
+// { marketId, resolution: '1m', currency: 'usd', from, to, candles: [{ time, open, high, low, close, volume, tickCount }],
+//   hasMore, nextBefore, liveCandleTime, sources: ['db' | 'provider'] }
+
+// Scrolling left: the previous page ends where this one started
+const older = await sdk.prices.getCandles('spot:BTC-USD', {
+  resolution: page.resolution,
+  to: page.nextBefore!,
+  limit: 300,
+});
+
+// Any explicit window
+const minute = await sdk.prices.getCandles('solana:<mint>', {
+  resolution: '1m',
+  from: 1_700_000_000,
+  to: 1_700_003_600,
+});
+```
+
+`liveCandleTime` is the open time of the candle currently forming; splice live ticks into it. The SDK ships the pure helpers for that: `createCandleSeries`, `replaceWithPage`, `prependPage`, `applyTick`, `applyTicks`, `toChartPoints` and `seriesChange`. A closed page is served with `Cache-Control: public, max-age=300`, a page that includes the forming candle with `max-age=1`.
+
+## React
+
+```tsx
+import {
+  useLiveCandles,
+  useLivePrice,
+  useLivePrices,
+  usePriceMarkets,
+} from '@dimcool/react-sdk';
+
+const { markets } = usePriceMarkets({ q: 'sol' });
+const { latest, status, connected } = useLivePrice('perp:SOL');
+const { quotes } = useLivePrices(markets.map((m) => m.id)); // a watch list: one batch per second
+const chart = useLiveCandles('solana:<mint>', { resolution: '1m', limit: 500 });
+// chart.candles (last one moves with ticks), chart.ticks (the recent tick ring),
+// chart.hasMore, chart.loadOlder(), chart.latest, chart.status
+```
+
+A refetch of the live page (the poll while the socket is down, a reconnect) merges into what `loadOlder()` paged in, so a chart the user panned back keeps its history. The token page picks the candle size from the span it shows (≤ 2 h → `1m`, ≤ 12 h → `5m`, ≤ 3 d → `15m`, ≤ 30 d → `1h`, ≤ 180 d → `4h`, else `1d`) and draws `chart.ticks` in its Live window.
+
+## Agents (MCP)
+
+| Tool                     | Purpose                                                                                                                                              |
+| ------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `dim_list_price_markets` | `{ query?, provider?, limit? }`: the markets with live prices and each feed's update interval                                                        |
+| `dim_get_price`          | The latest price and feed status of one market: a market id (`spot:BTC-USD`, `solana:<mint>`, `perp:SOL`), a pair like `BTC/USD`, a mint or a symbol |
+| `dim_get_prices`         | Up to 200 market ids at once, for a portfolio's `marketId`s; unwatched markets read `idle`                                                           |
+| `dim_get_price_history`  | `{ market, resolution?, from?, to?, limit? }`: OHLC candles with the change over the range; page back with `to = nextBefore`                         |
+
+See the [MCP tools reference](/mcp/tools#prices).
+
+## REST Endpoints
+
+All public (a bearer token is optional), rate limited separately from the rest of the API, and behind the `enable-price-feeds` feature flag (503 `PRICES_DISABLED` when off).
+
+| Method | Path                                                              | Purpose                                                                      |
+| ------ | ----------------------------------------------------------------- | ---------------------------------------------------------------------------- |
+| GET    | `/prices/markets?q=&provider=&assetType=&limit=`                  | Known markets, allowlisted first; `q` also searches the providers            |
+| GET    | `/prices/markets/:id`                                             | One market with `status` and `latest` (unknown Solana mints are registered)  |
+| GET    | `/prices/markets/:id/latest`                                      | `{ marketId, status, statusReason, tick, serverTs }`                         |
+| POST   | `/prices/latest` `{ ids: string[] }`                              | The same for up to 200 ids at once; unknown or unwatched ids read `idle`     |
+| GET    | `/prices/markets/:id/ticks?seconds=\|sinceTs=\|sinceSeq=&limit=`  | Ticks from the hot window, oldest first; `truncated` when the gap is too old |
+| GET    | `/prices/markets/:id/candles?resolution=&from=&to=&range=&limit=` | Candles oldest first with `hasMore` / `nextBefore` for backward paging       |
+| GET    | `/prices/status`                                                  | Admin: providers, the ingestion leader, local subscriptions and watch lists  |
+
+Market ids go in the path URL-encoded (`spot%3ABTC-USD`, `perp%3ASOL`); the socket takes the raw id.
+
+## Errors
+
+| Response                     | Meaning                                                                                |
+| ---------------------------- | -------------------------------------------------------------------------------------- |
+| `400 Invalid market id`      | Not `solana:<mint>`, `evm:<chainId>:<address>`, `spot:<BASE>-<QUOTE>` or `perp:<COIN>` |
+| `400 from must be before to` | A candles window with `from` at or after `to`                                          |
+| `404 Unknown market …`       | No provider knows the market                                                           |
+| `422 RESOLUTION_TOO_FINE`    | The feed cannot serve candles that fine                                                |
+| `503 PRICES_DISABLED`        | The `enable-price-feeds` flag is off                                                   |

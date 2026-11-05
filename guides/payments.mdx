@@ -1,6 +1,6 @@
 ---
 title: Payments & USDC
-description: "Send USDC, tip users, and understand the fee structure."
+description: 'Send USDC, tip users, and understand the fee structure.'
 ---
 
 ## Overview
@@ -24,7 +24,7 @@ Use the one-call wallet send method:
 ```typescript
 const result = await sdk.wallet.send(
   'alice.sol', // Username, .sol domain, or Solana address
-  1_000_000,   // 1.00 USDC in minor units
+  1_000_000, // 1.00 USDC in minor units
   'USDC',
 );
 console.log(`Sent! Signature: ${result.signature}`);
@@ -37,7 +37,8 @@ console.log(`Resolved recipient: ${result.recipientAddress}`);
   - Solana address (base58)
   - `.sol` SNS domain (for example `alice.sol`)
 
-  For `.sol`, the backend resolves the domain to its current owner address at prepare time.
+For `.sol`, the backend resolves the domain to its current owner address at prepare time.
+
 </Note>
 
 ## Tip a User
@@ -50,24 +51,33 @@ console.log(tip.signature);
 console.log(tip.message.id); // Broadcast message ID in global chat
 ```
 
+## Swap Tokens
+
+Swap between SOL, USDC and any tradable token without leaving DIM: quotes come from Jupiter and the network fee is covered by the platform. See [Swap Tokens](/guides/swap).
+
 ## Fee Structure
 
-| Action | Fee | Notes |
-| --- | --- | --- |
-| **Game** | 1% of bet per player | Min 1¢. Referred players get 10% off. |
-| **Transfer** | 1¢ ($0.01) | Flat fee per transfer |
-| **Tip** | 1¢ ($0.01) | Same as transfer |
-| **Min transfer** | 5¢ ($0.05) | Minimum amount |
+| Action           | Fee                  | Notes                                                                                                                                       |
+| ---------------- | -------------------- | ------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Game**         | 1% of bet per player | Min 1¢. Referred players get 10% off.                                                                                                       |
+| **Send**         | Free                 | A transfer to a Dim username, on Solana, Arbitrum, Base or Monad. Dim pays the network                                                      |
+| **Withdraw**     | 50¢ ($0.50)          | A transfer to a raw address or `.sol` name: a flat fee to Dim's treasury on that network, in USDC when you hold it there, else in the asset |
+| **Tip**          | Free                 | A send                                                                                                                                      |
+| **Min send**     | 5¢ ($0.05)           | 0.001 SOL, or $0.05 worth of another priced token                                                                                           |
+| **Min withdraw** | $1.00                | So the fee is never most of it                                                                                                              |
+
+Pass `network` (`solana`, `arbitrum`, `base` or `monad`) to `prepareTransfer` to send from the EVM wallet; there `token` is `USDC` or `NATIVE` (ETH, MON) and the response carries `evmTransactions` to send from your wallet instead of a Solana `transaction`. A username on an EVM network needs the recipient to have an EVM wallet (refusal code `recipient-no-evm-wallet`). The API decides send vs withdrawal from the recipient and never trusts the client's claim.
 
 ## MCP Tools
 
-| Tool | Description |
-| --- | --- |
-| `dim_get_balance` | Check SOL and USDC balance |
-| `dim_send_usdc` | Send USDC (handles prepare+sign+submit) |
-| `dim_tip_user` | Tip and broadcast to chat |
-| `dim_get_wallet_activity` | Recent transactions |
+| Tool                      | Description                             |
+| ------------------------- | --------------------------------------- |
+| `dim_get_balance`         | Check SOL and USDC balance              |
+| `dim_send_usdc`           | Send USDC (handles prepare+sign+submit) |
+| `dim_tip_user`            | Tip and broadcast to chat               |
+| `dim_get_wallet_activity` | Recent transactions                     |
 
 <Note>
-  The MCP tools handle the full prepare-sign-submit flow automatically. The agent just specifies the recipient and amount.
+  The MCP tools handle the full prepare-sign-submit flow automatically. The
+  agent just specifies the recipient and amount.
 </Note>

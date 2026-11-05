@@ -1,0 +1,181 @@
+---
+title: 'Sends and withdrawals'
+description: 'Send any token you hold to a DIM user for free, or withdraw it to an address for a flat fee, from your Solana wallet or your EVM wallet on Arbitrum, Base and Monad. The prepare, sign and submit flow, the fee rule, wallet activity, and the SDK, MCP and REST surfaces.'
+---
+
+## The rule
+
+A transfer leaves from any of your wallets, on any of the four networks, in any token you hold there. The API decides what kind of transfer it is from the recipient:
+
+| Recipient                                                         | Kind         | Fee                                                |
+| ----------------------------------------------------------------- | ------------ | -------------------------------------------------- |
+| A DIM username (`alice`, with or without `@`)                     | **send**     | Free, on every network. DIM pays the network       |
+| A raw address (base58 on Solana, `0x` on an EVM network)          | **withdraw** | A flat **$0.50** to DIM's treasury on that network |
+| A `.sol` name (Solana only, resolved to its owner at preparation) | **withdraw** | $0.50                                              |
+
+Minimums: a send starts at **$0.05** of value (5 cents of USDC, 0.001 SOL, or $0.05 worth of another priced token); a withdrawal starts at **$1.00** so the fee is never most of it.
+
+The withdrawal fee is taken in **USDC on the same network** when you hold at least $0.50 of it there, otherwise in **the asset you are withdrawing** ($0.50 worth at the current price). When neither can cover it the API refuses with `fee-unpayable`. A withdrawal's fee is recorded as a `FeeCollection` with source `TRANSFER` and funds [referral rewards](/guides/referrals) like any fee. A send records no fee.
+
+Money in the API is integer base units: USDC minor units (6 decimals), lamports, wei, or the token's own decimals. `feeUsdMinor` is always the fee in USDC minor units (`500000` = $0.50), whatever asset it was taken in.
+
+## Assets
+
+Name what you send with `token` and, when needed, `mint` and `network`:
+
+| Where                 | `token`          | Notes                                      |
+| --------------------- | ---------------- | ------------------------------------------ |
+| Solana                | `USDC` (default) |                                            |
+| Solana                | `SOL`            | Native SOL (`NATIVE` is an alias)          |
+| Solana                | `SPL` + `mint`   | Any other token you hold                   |
+| Arbitrum, Base, Monad | `USDC`           | `network: 'arbitrum' \| 'base' \| 'monad'` |
+| Arbitrum, Base, Monad | `NATIVE`         | ETH on Arbitrum and Base, MON on Monad     |
+
+Your holdings (`GET /trade/holdings/me`, `dim_get_user_holdings`) list every asset with its `assetId`: `solana:native`, `solana:<mint>`, `evm:<chainId>:native` or `evm:<chainId>:<contract>`. The MCP tools take a mint or an asset id and work out `token`, `mint` and `network` from the holding.
+
+## Solana flow
+
+1. **Prepare.** `POST /wallets/transfer/prepare { senderAddress, recipient, amount, token?, mint?, supportsPresign? }`. The answer carries the decision and the transaction:
+   - `prepareId`: echo it on submit so the fee is recorded as it was decided (the decision is kept for 10 minutes, `expiresAt`).
+   - `kind` (`send` or `withdraw`), `network`, `recipientAddress`, `recipientUserId` (for a send).
+   - `transaction`: the unsigned transaction, base64. DIM pays the network fee for sign-only wallets.
+   - `fee` in `feeMint` base units, `feeToken` (`USDC`, `SOL`, `SPL` or `null` for a send), `feeUsdMinor`, and `totalAmount` (`amount + fee` when the fee is taken in the asset sent, else `amount`).
+   - `mint`, `decimals`, `symbol` of the asset sent, and `ataCreated` when the recipient's token account is created in the same transaction.
+2. **Sign** the transaction with your wallet.
+3. **Submit.** `POST /wallets/transfer/submit { signedTransaction, senderAddress, recipientAddress, amount, token?, mint?, prepareId?, ataCreated?, recipientInput? }`. DIM broadcasts it and answers `{ signature, status }`.
+4. **Poll.** `GET /wallets/transfer/:signature` (signed in) returns `status` (`pending` → `confirmed` | `failed`), the fee as charged (`fee`, `feeToken`, `feeUsdMinor`, `feeStatus`) and explorer links.
+
+Wallets that broadcast themselves (sign-and-send) prepare with `supportsPresign: false`, send the transaction, then report it with `POST /wallets/transfer/confirm-signature { signature, senderAddress, recipientAddress, amount, token?, mint?, prepareId?, ataCreated?, recipientInput? }`. DIM then tracks and confirms it.
+
+```bash
+curl -X POST https://api.dim.cool/wallets/transfer/prepare \
+  -H "Content-Type: application/json" \
+  -d '{"senderAddress":"<your base58 address>","recipient":"alice","amount":1000000,"token":"USDC"}'
+# → { prepareId, kind: 'send', network: 'solana', transaction, fee: 0, feeUsdMinor: 0, totalAmount: 1000000, recipientAddress, ... }
+
+curl -X POST https://api.dim.cool/wallets/transfer/submit \
+  -H "Content-Type: application/json" \
+  -d '{"signedTransaction":"<base64>","senderAddress":"<you>","recipientAddress":"<resolved>","amount":1000000,"token":"USDC","prepareId":"<id>","recipientInput":"alice"}'
+```
+
+`prepare`, `submit` and `confirm-signature` are open endpoints (no session needed; 60 requests a minute per IP). A session is used when present: it lets the account send from its own EVM address, and `GET /wallets/transfer/:signature` always needs one.
+
+## EVM flow (Arbitrum, Base, Monad)
+
+The client sends the calls itself, from its own EVM wallet, and reports the hashes.
+
+1. **Prepare.** `POST /wallets/transfer/prepare { senderAddress: '0x…', recipient, amount, token: 'USDC' | 'NATIVE', network }` with a session. Instead of `transaction` the answer carries `evmTransactions`: the calls to send in order, `{ to, data, value, chainId }`. The transfer comes first, then the fee leg to DIM's treasury when there is one, so a failed fee never strands the transfer.
+2. **Send** each call from your EVM wallet, in order. On the web the Privy embedded wallet sends them with sponsored gas; an agent signs with its own EVM key.
+3. **Submit.** `POST /wallets/transfer/evm/submit { prepareId, senderAddress, txHashes }` with the hashes in the same order (1 or 2). Everything else is read from the prepared record, never from the body. The answer is `{ signature, feeSignature, network, status: 'pending' }`, where `signature` is the transfer's hash.
+4. **Poll.** `GET /wallets/transfer/:signature` as on Solana.
+
+A username send on an EVM network needs the recipient to have an EVM wallet; otherwise the API refuses with `recipient-no-evm-wallet`. Withdrawals on an EVM network are refused with `withdrawals-unavailable` while no EVM treasury is configured.
+
+## Refusals
+
+Refusals are `400` (or `404` for an unknown recipient) with a body `{ code, message }`; the SDK copies `code` onto the thrown error.
+
+| Code                      | Meaning                                                            |
+| ------------------------- | ------------------------------------------------------------------ |
+| `recipient-not-found`     | No DIM user with that username                                     |
+| `recipient-no-wallet`     | The user has no wallet to receive on                               |
+| `recipient-no-evm-wallet` | A username send on an EVM network to an account with no EVM wallet |
+| `recipient-invalid`       | Not a username, an address or a `.sol` name                        |
+| `self-transfer`           | Sending to yourself                                                |
+| `below-minimum`           | Under $0.05 (send) or $1.00 (withdrawal)                           |
+| `insufficient-balance`    | Not enough of the asset                                            |
+| `fee-unpayable`           | The $0.50 can be taken neither in USDC nor in the asset            |
+| `price-unavailable`       | The asset has no price, so its minimum or fee cannot be valued     |
+| `unsupported-asset`       | That asset is not sendable on that network                         |
+| `network-unavailable`     | The network is switched off                                        |
+| `withdrawals-unavailable` | No treasury on that network to receive the fee                     |
+| `prepare-expired`         | The `prepareId` is older than 10 minutes                           |
+| `hashes-mismatch`         | The EVM hashes posted do not match the calls handed out            |
+
+## Wallet activity
+
+`GET /wallets/me/activity?limit=&cursor=&kinds=` lists your deposits, transfers, swaps and payouts newest first (`kinds` is a comma list of `DEPOSIT`, `REFUND`, `PAYOUT`, `TRANSFER`, `SWAP`). Each item carries `kind`, `status`, `direction` (`IN` | `OUT`), `amount`, `mint`, `network`, `explorerUrl`, a `counterparty`, and for a transfer `transferKind` (`send` | `withdraw`) and `feeUsdMinor`. `GET /wallets/users/:userId/activity` is the public view of someone else's.
+
+Some items are **claimable**: money DIM owes you that was not paid automatically, for example pending referral rewards (`claimAction.type: 'referral_rewards_claim'`). `dim_get_wallet_activity` lists them under `claimableItems`; `dim_claim_funds { activityId }` claims one by running its `claimAction` (for referral rewards that is `POST /referrals/me/claim`), and `dim_claim_all_funds` runs every claimable item in turn and reports how many succeeded.
+
+## SDK
+
+```typescript
+// One call: prepare, sign with the configured signer, submit
+const result = await sdk.wallet.send('alice', 1_000_000, 'USDC');
+// { signature, status, kind: 'send', network: 'solana', fee: 0, feeUsdMinor: 0, totalAmount, recipientAddress, token, mint, symbol, feeToken: null, feeMint: null }
+
+// Any token you hold on Solana, by mint, in its base units
+await sdk.wallet.send('alice', 1_250_000, { mint: 'DezXAZ8z…pPB263' });
+
+// From the EVM wallet: set the sender first (returns the hash of each call)
+sdk.wallet.setEvmSender(sender, '0xYourEvmAddress');
+const out = await sdk.wallet.send('0xabc…', 5_000_000, {
+  network: 'base',
+  asset: 'USDC',
+});
+// out.kind: 'withdraw', out.fee: 500000, out.feeToken: 'USDC', out.totalAmount: 5_500_000
+
+// Step by step, to sign elsewhere
+const prepared = await sdk.wallet.prepareTransfer(
+  sender,
+  'alice',
+  1_000_000,
+  'USDC',
+);
+await sdk.wallet.submitTransfer(
+  signedTx,
+  sender,
+  prepared.recipientAddress,
+  1_000_000,
+  'USDC',
+  prepared.ataCreated,
+  'alice',
+  { prepareId: prepared.prepareId },
+);
+await sdk.wallet.submitEvmTransfer({ prepareId, senderAddress, txHashes });
+await sdk.wallet.confirmTransferSignature(
+  signature,
+  sender,
+  recipientAddress,
+  amount,
+  'USDC',
+  false,
+  'alice',
+  { prepareId },
+);
+
+await sdk.wallet.getTransfer(result.signature); // { status: 'pending' | 'confirmed' | 'failed', feeStatus, explorerUrl, ... }
+await sdk.wallet.getActivity({ limit: 20 }); // { items, nextCursor? }
+```
+
+`asset` is `'USDC' | 'SOL' | { mint } | { network, asset: 'USDC' | 'NATIVE' }`. A Solana send needs `setSigner(...)`; an EVM send needs `setEvmSender(sender, address)`. See the SDK README sections [`send(...)`](https://github.com/dimcool/dim/tree/main/packages/sdk#sendrecipient-amount-asset) and [Transfer recipient formats](https://github.com/dimcool/dim/tree/main/packages/sdk#transfer-recipient-formats).
+
+## MCP
+
+| Tool                      | Purpose                                                                                                                                |
+| ------------------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
+| `dim_send_usdc`           | `{ recipient, amount, network? }`: USDC, amount in dollars, from Solana (default) or the EVM wallet on Arbitrum, Base or Monad         |
+| `dim_send_token`          | `{ recipient, mint, amount, network? }`: any held token by mint or asset id, amount in whole tokens                                    |
+| `dim_confirm_send_usdc`   | External signer: report a Solana `signature`, or an EVM `prepareId` + `txHashes`, with the `confirmWith.params` the send tool returned |
+| `dim_get_wallet_activity` | `{ limit? }`: recent activity, with any claimable items                                                                                |
+| `dim_claim_funds`         | `{ activityId }`: run one claimable item's claim action                                                                                |
+| `dim_claim_all_funds`     | Run every claimable item                                                                                                               |
+
+With a Solana keypair configured, `dim_send_usdc` and `dim_send_token` sign and submit Solana transfers themselves. An EVM transfer is always signed outside: the tool returns `{ needsSigning: true, chain: 'evm', unsignedTx: evmTransactions, confirmWith }`; send each call in order and confirm with the hashes. In external-signer mode a Solana transfer returns `{ needsSigning: true, unsignedTx, confirmWith }` the same way. Sends count against the agent's daily spend limit at their USD value. See the [MCP tools reference](/mcp/tools#wallet).
+
+## REST
+
+| Method | Path                                  | Auth     | Purpose                                                                                                                                      |
+| ------ | ------------------------------------- | -------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
+| POST   | `/wallets/transfer/prepare`           | optional | `{ senderAddress, recipient, amount, token?, mint?, network?, supportsPresign? }`: decide and build                                          |
+| POST   | `/wallets/transfer/submit`            | none     | Solana: `{ signedTransaction, senderAddress, recipientAddress, amount, token?, mint?, prepareId?, ataCreated?, recipientInput? }`            |
+| POST   | `/wallets/transfer/confirm-signature` | none     | Solana, already broadcast: `{ signature, senderAddress, recipientAddress, amount, token?, mint?, prepareId?, ataCreated?, recipientInput? }` |
+| POST   | `/wallets/transfer/evm/submit`        | none     | EVM: `{ prepareId, senderAddress, txHashes }`                                                                                                |
+| GET    | `/wallets/transfer/:signature`        | user     | One transfer of yours, by signature or hash                                                                                                  |
+| GET    | `/wallets/me/activity`                | user     | Your wallet activity; `limit`, `cursor`, `kinds`                                                                                             |
+| GET    | `/wallets/users/:userId/activity`     | optional | Someone's activity                                                                                                                           |
+| GET    | `/wallets/me`                         | user     | Your Solana address                                                                                                                          |
+| GET    | `/wallets/me/balance`                 | user     | SOL and USDC on Solana (the unified balance is in [Funding](/guides/funding))                                                                |
+
+Moving money into or out of perps is not a transfer: see [Funding](/guides/funding).

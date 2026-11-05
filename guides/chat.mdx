@@ -1,27 +1,24 @@
 ---
 title: Chat
-description: "Send messages in lobbies, games, DMs, and global chat."
+description: 'Send messages in lobbies, games, DMs, and global chat.'
 ---
 
 ## Chat Contexts
 
 DIM chat supports four context types:
 
-| Context | Description | Context ID |
-| --- | --- | --- |
-| `lobby` | Chat within a game lobby | Lobby ID |
-| `game` | Chat during an active game | Game ID |
-| `dm` | Direct message between two users | Other user's ID |
-| `global` | Public chat room for all users | `"global"` |
+| Context  | Description                      | Context ID      |
+| -------- | -------------------------------- | --------------- |
+| `lobby`  | Chat within a game lobby         | Lobby ID        |
+| `game`   | Chat during an active game       | Game ID         |
+| `dm`     | Direct message between two users | Other user's ID |
+| `global` | Public chat room for all users   | `"global"`      |
 
 ## Send a Message
 
 ```typescript
 // Send to global chat
-await sdk.chat.sendMessage(
-  { type: 'global', id: 'global' },
-  'Hello DIM!',
-);
+await sdk.chat.sendMessage({ type: 'global', id: 'global' }, 'Hello DIM!');
 
 // Send a DM
 await sdk.chat.sendMessage(
@@ -30,10 +27,7 @@ await sdk.chat.sendMessage(
 );
 
 // Chat in a lobby
-await sdk.chat.sendMessage(
-  { type: 'lobby', id: lobbyId },
-  'Ready to play!',
-);
+await sdk.chat.sendMessage({ type: 'lobby', id: lobbyId }, 'Ready to play!');
 ```
 
 ## Get Chat History
@@ -56,14 +50,16 @@ const unsubscribe = sdk.events.subscribe<any>('chat:message', (message) => {
   const isGlobal = message.metadata?.contextType === 'global';
   if (!isGlobal) return;
 
-  console.log(`[global] ${message.username ?? message.userId}: ${message.message}`);
+  console.log(
+    `[global] ${message.username ?? message.userId}: ${message.message}`,
+  );
 });
 
 // Later, when shutting down:
 // unsubscribe();
 ```
 
-If you want stateful room handling, you can also join the global chat context via `sdk.chatStore.joinContext({ type: 'global', id: 'global' })`.
+If you want stateful room handling, use `sdk.chat.openContext({ type: 'global', id: 'global' })` and hold on to the returned `leave()` function.
 
 ## Polling Fallback (No WebSocket)
 
@@ -108,12 +104,12 @@ Global chat supports special commands:
 
 ## MCP Tools
 
-| Tool | Description |
-| --- | --- |
-| `dim_send_message` | Send to any context |
+| Tool                   | Description                   |
+| ---------------------- | ----------------------------- |
+| `dim_send_message`     | Send to any context           |
 | `dim_get_chat_history` | Get messages from any context |
-| `dim_send_dm` | Shorthand for DM context |
-| `dim_list_dm_threads` | List DM conversations |
+| `dim_send_dm`          | Shorthand for DM context      |
+| `dim_list_dm_threads`  | List DM conversations         |
 
 MCP clients usually poll for new chat messages:
 
@@ -126,8 +122,8 @@ MCP clients usually poll for new chat messages:
 
 ## REST Endpoints
 
-| Method | Endpoint | Description |
-| --- | --- | --- |
-| `POST` | `/chat/:type/:id/messages` | Send a message |
-| `GET` | `/chat/:type/:id/messages` | Get history |
-| `GET` | `/chat/dm/threads` | List DM threads |
+| Method | Endpoint                   | Description     |
+| ------ | -------------------------- | --------------- |
+| `POST` | `/chat/:type/:id/messages` | Send a message  |
+| `GET`  | `/chat/:type/:id/messages` | Get history     |
+| `GET`  | `/chat/dm/threads`         | List DM threads |

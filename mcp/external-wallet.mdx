@@ -1,33 +1,29 @@
 ---
 title: Using an External Wallet
-description: "Pair dim-mcp with a wallet MCP server like Phantom to play DIM without storing a private key."
+description: 'Run @dimcool/mcp without storing a private key: a wallet MCP signs the login, sends and moves into perps, and dim-mcp confirms them.'
 ---
 
 ## Overview
 
-By default, `@dimcool/mcp` manages signing internally using a Solana keypair you provide via `DIM_WALLET_PRIVATE_KEY`. If you already use a wallet MCP server like [Phantom](https://www.npmjs.com/package/@phantom/mcp-server), you can skip the private key entirely and let your existing wallet handle all signing.
+By default `@dimcool/mcp` signs with a key you give it (`DIM_WALLET_PRIVATE_KEY` or a wallet store). If your agent already has a wallet MCP that holds its keys, leave DIM's key configuration empty: the server starts in **external signer mode** and hands every signature to the wallet.
 
-When both MCP servers are configured, your agent uses dim-mcp for all DIM actions (games, transfers, markets) and Phantom MCP for signing and broadcasting transactions.
+In that mode your agent uses dim-mcp for everything DIM (perps, posts, follows, referrals, balances) and the wallet MCP only to sign and broadcast.
 
----
-
-## Setup with Phantom MCP
+## Setup
 
 <Tabs>
   <Tab title="Claude Desktop">
 ```json
 {
   "mcpServers": {
-    "phantom": {
+    "wallet": {
       "command": "npx",
-      "args": ["-y", "@phantom/mcp-server"]
+      "args": ["-y", "<your wallet MCP package>"]
     },
     "dim": {
       "command": "npx",
       "args": ["@dimcool/mcp"],
-      "env": {
-        "DIM_API_URL": "https://api.dim.cool"
-      }
+      "env": { "DIM_API_URL": "https://api.dim.cool" }
     }
   }
 }
@@ -37,9 +33,9 @@ When both MCP servers are configured, your agent uses dim-mcp for all DIM action
 ```json
 {
   "mcpServers": {
-    "phantom": {
+    "wallet": {
       "command": "npx",
-      "args": ["-y", "@phantom/mcp-server"]
+      "args": ["-y", "<your wallet MCP package>"]
     },
     "dim": {
       "command": "npx",
@@ -52,128 +48,104 @@ When both MCP servers are configured, your agent uses dim-mcp for all DIM action
   </Tab>
 </Tabs>
 
-No `DIM_WALLET_PRIVATE_KEY` needed. dim-mcp detects the missing key and starts in external signer mode automatically.
-
-<Note>
-  These examples assume the current `@phantom/mcp-server` package setup, which does not require `PHANTOM_APP_ID` in the MCP config. For the latest wallet connection steps, follow the [@phantom/mcp-server npm page](https://www.npmjs.com/package/@phantom/mcp-server).
-</Note>
-
----
+No `DIM_WALLET_PRIVATE_KEY`, no `DIM_WALLET_STORE_PATH`, no `DIM_WALLET_AUTO_CREATE`. dim-mcp notices the missing key and switches modes by itself.
 
 ## How signing works
 
-When a dim-mcp tool needs a signature, it returns the unsigned payload along with a `confirmWith` hint. Your agent signs and broadcasts via Phantom, then calls the confirm tool to complete the operation.
-
-Each signing flow is three steps:
+A dim-mcp tool that needs a signature returns the unsigned payload with `needsSigning: true` and a `confirmWith` hint naming the tool that finishes the operation and the parameters to pass back. Three steps, every time:
 
 ```
-dim-mcp tool        → returns unsigned payload + confirmWith hint
-Phantom MCP tool    → signs and broadcasts, returns signature
-dim-mcp confirm     → records the on-chain transaction, operation completes
+dim-mcp tool      → { needsSigning: true, unsignedTx, confirmWith: { tool, params } }
+wallet MCP        → signs (and usually broadcasts), returns a signature or transaction hashes
+dim-mcp confirm   → records what happened, the operation completes
 ```
 
----
+The Solana payloads are standard base64 legacy transactions; the EVM payloads are `{ to, data, value, chainId }` calls to send in order.
 
 ## Flow reference
 
 ### Log in
 
 ```
-1. get_wallet_addresses (phantom-mcp)
-   → { solana: "7xKXtg..." }
+1. wallet MCP: get the Solana address
+   → "7xKXtg…"
 
-2. dim_request_auth_message("7xKXtg...") (dim-mcp)
-   → { message: "Sign in to DIM: <nonce>" }
+2. dim_request_auth_message({ address: "7xKXtg…" })
+   → { message: "Sign this message to authenticate: <nonce>", nextStep }
 
-3. sign_solana_message(message: "Sign in to DIM: <nonce>", networkId: "solana:mainnet") (phantom-mcp)
-   → { signature: "3T7kMn..." }
+3. wallet MCP: sign the message (a plain message signature, network solana:mainnet)
+   → signature (base58, base64 or base64url are all accepted)
 
-4. dim_complete_login("7xKXtg...", "3T7kMn...") (dim-mcp)
+4. dim_complete_login({ address: "7xKXtg…", signature })
    → { userId, username, walletAddress, nextSteps }
 ```
 
-### Deposit for a paid game
-
-```
-1. dim_deposit_for_lobby("lobby-id") (dim-mcp)
-   → { needsSigning: true, unsignedTx: "AQIDBA...", confirmWith: { tool: "dim_confirm_lobby_deposit", ... } }
-
-2. send_solana_transaction("AQIDBA...") (phantom-mcp)
-   → { signature: "5xMnPq..." }
-
-3. dim_confirm_lobby_deposit(lobbyId: "lobby-id", signature: "5xMnPq...") (dim-mcp)
-   → { canProceedToQueue: true }
-```
+The handshake lives two minutes; sign within that window.
 
 ### Send USDC
 
 ```
-1. dim_send_usdc("alice", 1.00) (dim-mcp)
-   → { needsSigning: true, unsignedTx: "BQCDEF...", confirmWith: { tool: "dim_confirm_send_usdc", ... } }
+1. dim_send_usdc({ recipient: "alice", amount: 1.00 })
+   → { needsSigning: true, unsignedTx: "<base64>", confirmWith: { tool: "dim_confirm_send_usdc", params: { … } } }
 
-2. send_solana_transaction("BQCDEF...") (phantom-mcp)
-   → { signature: "9pLwQr..." }
+2. wallet MCP: sign and broadcast unsignedTx
+   → signature "5xMn…"
 
-3. dim_confirm_send_usdc(signature: "9pLwQr...", ...) (dim-mcp)
+3. dim_confirm_send_usdc({ signature: "5xMn…", ...confirmWith.params })
    → { signature, status, recipientAddress, fee, totalAmount }
 ```
 
-### Tip a user
+`amount` is in dollars for this tool; the confirm parameters carry it in USDC minor units, which is why you pass `confirmWith.params` back as given. A send to a Dim username is free; a send to a raw address is a withdrawal with a flat $0.50 fee and a $1.00 minimum.
+
+On Arbitrum, Base or Monad (`network` set) `unsignedTx` is a list of EVM calls: send them from your EVM wallet in order (the transfer, then the fee when there is one) and confirm with `txHashes` in that order plus the `prepareId` from `confirmWith.params`.
+
+### Move money into perps
 
 ```
-1. dim_tip_user("alice", 0.50) (dim-mcp)
-   → { needsSigning: true, unsignedTx: "...", confirmWith: { tool: "dim_confirm_tip_user", ... } }
+1. dim_move_to_perps({ amount: 20, network: "solana", asset: "USDC" })
+   → { needsSigning: true, transferId, legIndex, solanaTransaction: "<base64>",
+       confirmWith: { tool: "dim_submit_perps_move_signature", params: { transferId, legIndex } } }
 
-2. send_solana_transaction(unsignedTx) (phantom-mcp)
-   → { signature: "..." }
+2. wallet MCP: sign (and broadcast) the transaction
+   → signedTransaction (base64) or, if the wallet broadcast it, the signature
 
-3. dim_confirm_tip_user(signature, ...) (dim-mcp)
-   → { success: true }
+3. dim_submit_perps_move_signature({ transferId, legIndex, signedTransaction })   // or { signature }
+   → the move, now state "moving"
+
+4. dim_get_perps_move({ transferId })
+   → steps with their transaction links, until state is "done"
 ```
 
-### Buy prediction market shares
+A move from an EVM network returns `evmTransactions` instead: send them in order (the USDC `approve` when needed, then the deposit) and pass `txHashes`. A move waits in `signing` until its `expiresAt`; reading it back with `dim_get_perps_move` returns the same payload to sign again, and a second move is refused with `action-in-flight` until this one is signed or expires.
+
+### Enroll for perps with your own EVM wallet
 
 ```
-1. dim_buy_shares("game-id", "outcome-id", 0.50) (dim-mcp)
-   → { needsSigning: true, unsignedTx: "...", confirmWith: { tool: "dim_confirm_buy_shares", ... } }
+1. dim_enable_perps()
+   → { needsSigning: true, address, actions: [{ kind: "approveAgent", typedData }, { kind: "approveBuilderFee", typedData }],
+       confirmWith: "dim_complete_perps_enrollment" }
 
-2. send_solana_transaction(unsignedTx) (phantom-mcp)
-   → { signature: "..." }
+2. wallet MCP: sign each typedData (EIP-712) with the EVM key
+   → 0x signatures
 
-3. dim_confirm_buy_shares(signature, gameId, outcomeId, amount) (dim-mcp)
-   → { shares, price }
+3. dim_complete_perps_enrollment({ approveAgent: "0x…", approveBuilderFee: "0x…" })
+   → your perps account, enabled
 ```
 
-### Donate to a game pot
+The two approvals authorize DIM's agent key to trade for you under a builder fee capped at 10 bps; only your key can withdraw from the venue.
 
-```
-1. dim_donate_to_pot("game-id", 0.25) (dim-mcp)
-   → { needsSigning: true, unsignedTx: "...", confirmWith: { tool: "dim_confirm_donate_to_pot", ... } }
+## Operations that need no signing
 
-2. send_solana_transaction(unsignedTx) (phantom-mcp)
-   → { signature: "..." }
+These work the same in both modes:
 
-3. dim_confirm_donate_to_pot(signature, ...) (dim-mcp)
-   → { success: true }
-```
-
----
-
-## Operations that don't require signing
-
-These work the same regardless of wallet setup:
-
-| Tool | Notes |
-|------|-------|
-| `dim_sell_shares` | No on-chain transaction |
-| `dim_redeem_shares` | No on-chain transaction |
-| `dim_claim_funds` / `dim_claim_all_funds` | Handled server-side |
-| All game play tools | `dim_submit_action`, `dim_game_loop` *(local only)*, `dim_get_game_state`, etc. |
-| All social and chat tools | No wallet interaction |
-| All read tools | Balance, activity, leaderboard, etc. |
-
----
+| Tools                                                                                            | Why                                                            |
+| ------------------------------------------------------------------------------------------------ | -------------------------------------------------------------- |
+| `dim_quote_perp`, `dim_open_perp`, `dim_close_perp`                                              | Orders are signed by the agent key you approved at enrollment. |
+| `dim_withdraw_from_perps`, `dim_resume_perps_move`                                               | DIM signs every step of a move out; it only brings money home. |
+| `dim_create_post`, `dim_reply_to_post`, `dim_follow_user`, `dim_set_username`                    | Writes under your JWT, no money.                               |
+| `dim_claim_referral_rewards`, `dim_apply_referral_code`                                          | Handled server-side.                                           |
+| Every read: balances, deposit info, markets, positions, the feed, the leaderboard, notifications | Reads.                                                         |
 
 ## Using a different wallet MCP
 
-This setup works with any wallet MCP that exposes `sign_solana_message` and `send_solana_transaction`. The unsigned transactions dim-mcp returns are standard base64-encoded Solana transactions compatible with any Solana wallet.
+Any wallet MCP that can sign a plain Solana message and sign-and-send a base64 Solana transaction works for the login and the Solana flows; one that can also sign EIP-712 typed data and send EVM calls covers enrollment and the EVM flows. dim-mcp never needs to know which wallet it is: it only reads back signatures and hashes.

@@ -1,0 +1,38 @@
+---
+title: 'Points'
+description: 'What earns points on Dim and how to read yours.'
+---
+
+Points are a record of activity on Dim. They are not a token and do not convert into one.
+
+## What earns points
+
+| Activity                                                       | Points               |
+| -------------------------------------------------------------- | -------------------- |
+| A perp fill on a real venue (open or close)                    | 1 per $1 of notional |
+| A spot trade recorded on Dim                                   | 1 per $1 traded      |
+| A game you played (fee), a referral commission, a pot donation | 1 per $0.001 of fee  |
+| A transfer, or paper trading                                   | none                 |
+
+Every award is recorded once, keyed by what earned it: a fill read twice awards once.
+
+## Reading them
+
+| Method | Endpoint           | Auth     | What it returns                                                             |
+| ------ | ------------------ | -------- | --------------------------------------------------------------------------- |
+| `GET`  | `/points/me`       | Bearer   | Your total, what each source earned, the latest 20 awards, the trading rate |
+| `GET`  | `/users/:id/stats` | Optional | Anyone's total (`points`) with their other stats                            |
+
+```typescript
+const mine = await sdk.points.getMine();
+// { points: 1250, pointsPerUsdTraded: 1, bySource: { PERP_TRADE: 1000, GAME: 250, … }, recent: [...] }
+```
+
+```tsx
+import { usePoints } from '@dimcool/react-sdk';
+
+function Points() {
+  const { summary } = usePoints();
+  return <span>{summary?.points ?? 0} points</span>;
+}
+```

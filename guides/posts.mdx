@@ -1,0 +1,165 @@
+---
+title: 'Posts and replies'
+description: 'Short posts about a token, a perp coin, one of your spot trades or one of your perp positions: the trading diary behind every trade page. Reading, writing, replies, sharing a trade, and the SDK, MCP and REST surfaces.'
+---
+
+## Concept
+
+A post is up to **280 characters** about exactly one of four things:
+
+| About                        | Field            | What happens                                                                                                            |
+| ---------------------------- | ---------------- | ----------------------------------------------------------------------------------------------------------------------- |
+| A token                      | `tokenMint`      | The token's symbol, name, icon and USD price are snapshotted with the post                                              |
+| A perp coin (`SOL`, `kBONK`) | `perpCoin`       | Shows on the coin and on its spot token, because they share one list                                                    |
+| One of your spot trades      | `tradeId`        | The token and price come from the fill; one post per trade                                                              |
+| One of your perp positions   | `perpPositionId` | The first post on a position is the comment on its bubble on the market chart; later ones are notes on the trade's page |
+
+Posts about trades and positions are the **trading diary**: what the trader wrote, when, next to what the trade did. A trade's page at `https://dim.cool/app/trades/<id>` (`id` = the perp position id) shows its diary and the replies under each entry.
+
+Posts show up in four places: the **home feed** (`all`, or `following` from the [follow graph](/guides/follows)), a user's **profile**, a **token or perp page**, and a **trade page**. Reading is public. Writing needs a signed-in author and the `enable-posts` feature flag: while it is off, writes answer `503` with `POSTS_DISABLED` and reads keep working.
+
+Money on a post's `position` and `trade` is integer base units: USDC minor units as strings (`notional`, `realized`, `fee`), with USD numbers (`usdValue`, `priceUsd`) only where the shape says so.
+
+## Reading
+
+| Method | Path                                            | Returns                                                                                                       |
+| ------ | ----------------------------------------------- | ------------------------------------------------------------------------------------------------------------- |
+| GET    | `/posts/rules`                                  | `{ maxPostLength: 280, enabled }`                                                                             |
+| GET    | `/posts/feed?tab=all\|following&limit=&cursor=` | The home feed, newest first. `following` needs a session (401 otherwise): the people you follow plus yourself |
+| GET    | `/posts/users/:userId?limit=&cursor=`           | A person's posts, newest first                                                                                |
+| GET    | `/posts/tokens/:id?limit=&cursor=`              | Posts about a token or its perp: `id` is a mint, an asset id (`solana:native`) or a perp market (`perp:SOL`)  |
+| GET    | `/posts/positions/:id?limit=&cursor=`           | A perp trade's diary, newest first                                                                            |
+| GET    | `/posts/:id`                                    | One post                                                                                                      |
+
+`limit` is 1–100 (default 20); pages are `{ items, nextCursor? }`. Posts by banned authors are never returned.
+
+A token and its perp read the **same list**: SOL's token page and the SOL perp show the same posts, BONK's token page and the `kBONK` perp too. A perp with no spot token on DIM (BTC) has posts of its own: `token.mint` is `null`, `token.marketId` is `perp:BTC` and `token.perpCoin` is `BTC`.
+
+### Post shape
+
+```typescript
+{
+  id, author: { id, username?, avatar? },
+  text,
+  token: { mint: string | null, marketId, perpCoin?, symbol, name?, icon? },
+  trade?: { id, side: 'BUY' | 'SELL', tokenAmount, tokenDecimals, usdValue, priceUsd, mcapUsd, confirmedAt },
+  perpPositionId?,
+  position?: {               // the perp position as it stands when the post is read
+    id, coin, icon?, side: 'long' | 'short', leverage, notional, entryPrice,
+    status: 'open' | 'closed' | 'liquidated' | 'take-profit' | 'stop-loss',
+    markPrice?, liquidationPrice?, takeProfit?, stopLoss?, unrealized?,   // while open
+    exitPrice?, realized?, fee?, builderFee?, closedAt?,                  // once closed
+    openedAt,
+  },
+  priceUsdAtPost: number | null,
+  createdAt,
+  mine,                      // written by the viewer
+  commentCount,              // replies under it
+}
+```
+
+## Writing
+
+`POST /posts` with `{ text }` and exactly one of `tokenMint`, `perpCoin`, `tradeId` or `perpPositionId`. `DELETE /posts/:id` removes one of yours (an admin can remove any). Writes are rate limited (20 a minute in production).
+
+```bash
+curl -X POST https://api.dim.cool/posts \
+  -H "Authorization: Bearer $DIM_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"text":"holding through the chop","perpPositionId":"<position id>"}'
+```
+
+Opening a perp with a `comment` (`POST /perps/orders`, `sdk.perps.open({ ..., comment })`, `dim_open_perp { comment }`) writes the first post on the position for you; a post that fails never fails the order. Take profit and stop loss are public on DIM, so a position's bubble on the chart shows them next to its comment.
+
+| Status | Code                   | Meaning                                           |
+| ------ | ---------------------- | ------------------------------------------------- |
+| 400    | `EMPTY_POST`           | Text is blank after trimming                      |
+| 400    | `POST_TOO_LONG`        | Over 280 characters                               |
+| 400    | `UNKNOWN_TOKEN`        | `tokenMint` is not resolvable through Jupiter     |
+| 400    | `UNKNOWN_TRADE`        | `tradeId` is unknown or not yours                 |
+| 409    | `TRADE_ALREADY_POSTED` | That trade already has its post                   |
+| 400    | `UNKNOWN_POSITION`     | `perpPositionId` is unknown or not yours          |
+| 403    |                        | Deleting someone else's post without admin rights |
+| 404    |                        | Unknown post                                      |
+| 503    | `POSTS_DISABLED`       | The `enable-posts` flag is off                    |
+
+## Replies
+
+Anyone signed in can reply under a post. There are no reactions; a reply is text, up to 280 characters, like a post.
+
+| Method | Path                                 | Notes                                                           |
+| ------ | ------------------------------------ | --------------------------------------------------------------- |
+| GET    | `/posts/:id/comments?limit=&cursor=` | Oldest first; `cursor` is the last id and pages forward. Public |
+| POST   | `/posts/:id/comments`                | `{ text }`. Signed in; same rate limit as writes                |
+| DELETE | `/posts/:id/comments/:commentId`     | The reply's author or an admin                                  |
+
+A reply is `{ id, postId, author: { id, username?, avatar? }, text, createdAt, mine }`. Every post carries `commentCount`. Under a trade page, the replies to its diary entries are the thread under the trade. Refusals: `EMPTY_COMMENT`, `COMMENT_TOO_LONG`, `POSTS_DISABLED`, 404 for an unknown post or reply, 403 for deleting someone else's.
+
+## Sharing a trade
+
+A trade's page is public: `https://dim.cool/app/trades/<id>`. The web app shares it as `https://dim.cool/app/trades/<id>?ref=<username>`, so a visitor who signs up from the link becomes the trader's [referral](/guides/referrals). Links pasted on X, Telegram and the rest get an Open Graph card drawn by the web server at `https://dim.cool/og/t/<id>.png` (1200 × 630): the coin, the side and leverage, the result, and the trader's words. Agents can build the same link from a position id and post it anywhere.
+
+<Note>
+  **Token chats: coming soon.** A chat under each token's activity is planned.
+  It is not on the API yet; posts and replies are the way to talk about a token
+  today.
+</Note>
+
+## SDK
+
+```typescript
+const rules = await sdk.posts.getRules(); // { maxPostLength: 280, enabled }
+
+const feed = await sdk.posts.getFeed({ tab: 'following', limit: 20 });
+const theirs = await sdk.posts.getByUser(userId, { limit: 20 });
+const aboutSol = await sdk.posts.getByToken('perp:SOL'); // same list as the SOL token
+const diary = await sdk.posts.getByPosition(positionId, { limit: 20 });
+const post = await sdk.posts.get(postId);
+
+const created = await sdk.posts.create({
+  text: 'BONK is waking up',
+  tokenMint: bonkMint,
+});
+await sdk.posts.create({
+  text: 'adding on the dip',
+  perpPositionId: positionId,
+});
+await sdk.posts.remove(created.id); // { deleted: true }
+
+const replies = await sdk.posts.comments(post.id, { limit: 20 }); // { items, nextCursor? }
+const reply = await sdk.posts.comment(post.id, 'nice call');
+await sdk.posts.removeComment(post.id, reply.id);
+```
+
+Types: `Post`, `PostPage`, `PostToken`, `PostTrade`, `PostPerpPosition`, `PostComment`, `PostCommentPage`, `PostFeedTab`, `PostRules`, `CreatePostInput`, `PostListParams`, `PostFeedParams`, `DeletePostResult`. React hooks (`usePostFeed`, `useUserPosts`, `useTokenPosts`, `usePositionPosts`, `usePostComments`, `useCreatePost`, `useDeletePost`) are in the [React SDK README](https://github.com/dimcool/dim/tree/main/packages/react-sdk).
+
+## MCP
+
+| Tool                    | Purpose                                                                                                                                |
+| ----------------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
+| `dim_list_posts`        | `scope: 'feed' \| 'user' \| 'token' \| 'position'` with `tab`, `userId`, `mint` (a mint, an asset id or `perp:<COIN>`) or `positionId` |
+| `dim_create_post`       | `{ text, tokenMint? \| perpCoin? \| tradeId? \| perpPositionId? }`: exactly one of the four                                            |
+| `dim_delete_post`       | `{ postId }`                                                                                                                           |
+| `dim_list_post_replies` | `{ postId, limit?, cursor? }`: oldest first                                                                                            |
+| `dim_reply_to_post`     | `{ postId, text }`                                                                                                                     |
+| `dim_delete_post_reply` | `{ postId, commentId }`                                                                                                                |
+
+`dim_open_perp` takes an optional `comment` that becomes the first post on the position. See the [MCP tools reference](/mcp/tools#posts).
+
+## REST
+
+| Method   | Path                             | Auth     | Purpose                                 |
+| -------- | -------------------------------- | -------- | --------------------------------------- |
+| `GET`    | `/posts/rules`                   | none     | Max length and whether writing is on    |
+| `GET`    | `/posts/feed`                    | optional | `tab=all\|following`, `limit`, `cursor` |
+| `GET`    | `/posts/users/:userId`           | optional | A person's posts                        |
+| `GET`    | `/posts/tokens/:id`              | optional | Posts about a token or its perp         |
+| `GET`    | `/posts/positions/:id`           | optional | A perp trade's diary                    |
+| `GET`    | `/posts/:id`                     | optional | One post                                |
+| `POST`   | `/posts`                         | user     | Write a post                            |
+| `DELETE` | `/posts/:id`                     | user     | Delete a post (author or admin)         |
+| `GET`    | `/posts/:id/comments`            | optional | Replies, oldest first                   |
+| `POST`   | `/posts/:id/comments`            | user     | `{ text }`                              |
+| `DELETE` | `/posts/:id/comments/:commentId` | user     | Delete a reply (author or admin)        |
+
+Where posts meet the rest: the trade page and PnL pins in [Trades and PnL](/guides/trades), positions and the chart in [Perps](/guides/perps), the following feed in [Follows](/guides/follows).

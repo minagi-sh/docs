@@ -1,0 +1,155 @@
+---
+title: Follows
+description: 'Search for people and build your follow graph on DIM: a directed, idempotent follow with no acceptance step, the lists it powers, and the following feeds of posts and trades.'
+---
+
+## Concept
+
+DIM's social graph is a directed follow graph, not a mutual connection list. Following someone needs no acceptance: the action is idempotent, so following a user you already follow or unfollowing a user you don't follow both just return the current state.
+
+Each pair of users has two independent booleans:
+
+- `followedByYou` — you follow them
+- `followsYou` — they follow you
+
+"Mutual" means both are true. There is no pending/accepted state and nothing to accept or decline.
+
+Following someone puts their posts and trades in your following feeds; your followers see yours.
+
+## Search Users
+
+Find people by username prefix:
+
+```typescript
+const results = await sdk.users.searchUsers('alice', 1, 10);
+// Returns: { users: [...], total, page, limit, totalPages }
+```
+
+`GET /users/search?username=alice&page=1&limit=10` is public; signed in, each result carries `followedByYou` and `followsYou`. It is rate limited per caller (40 a minute, 1,000 a day).
+
+## Follow / Unfollow
+
+```typescript
+const result = await sdk.follows.follow(userId);
+// Returns: { created, followedByYou: true, followsYou, counts: { followers, following } }
+
+const result2 = await sdk.follows.unfollow(userId);
+// Returns: { removed, followedByYou: false, followsYou, counts }
+```
+
+Both calls are idempotent. Following yourself returns a 400; following an unknown user returns a 404. In production, follows and unfollows are limited to 30 a minute.
+
+## List Followers / Following / Mutual
+
+```typescript
+const followers = await sdk.follows.followers(userId, {
+  limit: 20,
+  q: 'search-text',
+});
+const following = await sdk.follows.following(userId, { limit: 20 });
+
+// People you follow who also follow userId
+const mutual = await sdk.follows.mutual(userId, { limit: 20 });
+// Returns: { items: FollowEntry[], nextCursor? }
+```
+
+`FollowEntry` shape:
+
+```typescript
+{
+  id, username, name, avatar, bio,
+  type, connectedStatus, lastConnectedAt,
+  followsYou, followedByYou, since,
+}
+```
+
+`followers` and `following` are public; `mutual` requires a session. All three accept `limit` (1-100, default 50), `cursor` and `q` (narrow by username or name).
+
+## Suggestions, popular people and relation
+
+```typescript
+const suggestions = await sdk.follows.suggestions(10);
+// GET /follows/suggestions (signed in): the most followed accounts you do not follow yet
+
+const popular = await sdk.follows.popular(20);
+// GET /follows/popular (public): the most followed accounts with their follower counts, 1-50
+// Returns: [{ ...FollowEntry, followers: 128 }]; house accounts never rank
+
+const relation = await sdk.follows.relation(userId);
+// GET /follows/:userId/relation (signed in): { followedByYou, followsYou }
+```
+
+## Following feeds
+
+Two feeds are built from who you follow, both with `tab=all | following` and `limit` / `cursor`:
+
+- `GET /posts/feed?tab=following`: posts from the people you follow plus your own. See [Posts and replies](/guides/posts).
+- `GET /trades/feed?tab=following`: their spot trades as events. See [Trades and PnL](/guides/trades).
+
+`tab=following` needs a session and answers 401 without one.
+
+## React Hooks
+
+```typescript
+const { follow, unfollow, pendingUserId, error } = useFollowActions();
+const { items, nextCursor, isLoading } = useFollowList(userId, 'followers', {
+  q,
+  limit,
+});
+const { items } = useFollowSuggestions({ limit: 10 });
+const { followedByYou, followsYou } = useEffectiveFollowStatus(
+  userId,
+  initialFollowedByYou,
+);
+```
+
+`follow()` and `unfollow()` set an optimistic `followedByYou` at once and drop it if the request fails.
+
+## MCP Tools
+
+| Tool                     | Description                                                             |
+| ------------------------ | ----------------------------------------------------------------------- |
+| `dim_search_users`       | Search by username                                                      |
+| `dim_follow_user`        | Follow a user by ID                                                     |
+| `dim_unfollow_user`      | Unfollow a user by ID                                                   |
+| `dim_list_followers`     | List followers, with pagination and search                              |
+| `dim_list_following`     | List who a user follows, with pagination and search                     |
+| `dim_get_popular_people` | The most followed accounts, with follower counts and whether you follow |
+
+See the [MCP tools reference](/mcp/tools#follows).
+
+## CLI
+
+```bash
+dim follows add <userId>
+dim follows remove <userId>
+dim follows followers [--userId] [--limit] [--cursor]
+dim follows following [--userId] [--limit] [--cursor]
+```
+
+## REST Endpoints
+
+| Method   | Endpoint                      | Auth     | Description                                   |
+| -------- | ----------------------------- | -------- | --------------------------------------------- |
+| `GET`    | `/users/search?username=xxx`  | optional | Search users                                  |
+| `POST`   | `/follows/:userId`            | user     | Follow a user                                 |
+| `DELETE` | `/follows/:userId`            | user     | Unfollow a user                               |
+| `GET`    | `/follows/:userId/followers`  | optional | List followers                                |
+| `GET`    | `/follows/:userId/following`  | optional | List who a user follows                       |
+| `GET`    | `/follows/:userId/mutual`     | user     | People you follow who also follow them        |
+| `GET`    | `/follows/:userId/relation`   | user     | Both directions between you and a user        |
+| `GET`    | `/follows/suggestions?limit=` | user     | The most followed accounts you do not follow  |
+| `GET`    | `/follows/popular?limit=`     | optional | The most followed accounts, 1-50 (default 20) |
+| `GET`    | `/posts/feed?tab=following`   | user     | Posts from the people you follow              |
+| `GET`    | `/trades/feed?tab=following`  | user     | Trades from the people you follow             |
+
+## Notifications
+
+Every new follower triggers a `new_follower` notification for the person followed (`GET /notifications`, pushed on the socket; see [Your account](/guides/account)).
+
+## Where Follows Are Used
+
+- The home feed's Following tab: [posts](/guides/posts) from the people you follow, plus your own.
+- The trades feed's Following tab: their [spot trades](/guides/trades).
+- The perps leaderboard (`GET /perps/leaderboard`) marks each trader with `followedByYou`, so you can follow the people whose [perps](/guides/perps) results you want in your feed.
+- A profile (`GET /users/:id`) carries `followersCount`, `followingCount` and, signed in, `followedByYou` and `followsYou`.

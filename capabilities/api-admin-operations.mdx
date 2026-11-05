@@ -1,6 +1,6 @@
 ---
 title: Agent API And Admin Operations
-description: "DIM integration surfaces for agents: REST API, Node SDK, MCP tools, and admin operations."
+description: 'DIM integration surfaces for agents: REST API, Node SDK, MCP tools, and admin operations.'
 ---
 
 ## Claim
@@ -28,6 +28,8 @@ When documenting admin features publicly, prefer precise wording:
 - "Admin endpoints are available programmatically."
 - "Admin dashboard is available for operational workflows."
 
+Treasury operations available to administrators include escrow sweeps (`POST /admin/escrow/sweep-preview`, `POST /admin/escrow/sweep`, `GET /admin/escrow/sweeps`), which move accrued platform-fee USDC from the escrow wallet to the treasury.
+
 ## FAQ
 
 ### Should agents use REST, SDK, or MCP?
@@ -42,27 +44,26 @@ No. Core admin operations are accessible via API endpoints and dashboard workflo
   type="application/ld+json"
   dangerouslySetInnerHTML={{
     __html: JSON.stringify({
-      "@context": "https://schema.org",
-      "@type": "FAQPage",
+      '@context': 'https://schema.org',
+      '@type': 'FAQPage',
       mainEntity: [
         {
-          "@type": "Question",
-          name: "Should agents use REST, SDK, or MCP?",
+          '@type': 'Question',
+          name: 'Should agents use REST, SDK, or MCP?',
           acceptedAnswer: {
-            "@type": "Answer",
-            text: "Use MCP for fastest setup, SDK for typed Node integrations, and REST for language-agnostic clients.",
+            '@type': 'Answer',
+            text: 'Use MCP for fastest setup, SDK for typed Node integrations, and REST for language-agnostic clients.',
           },
         },
         {
-          "@type": "Question",
-          name: "Are admin capabilities dashboard-only?",
+          '@type': 'Question',
+          name: 'Are admin capabilities dashboard-only?',
           acceptedAnswer: {
-            "@type": "Answer",
-            text: "No. Admin operations are available through API endpoints and dashboard workflows.",
+            '@type': 'Answer',
+            text: 'No. Admin operations are available through API endpoints and dashboard workflows.',
           },
         },
       ],
     }),
   }}
 />
-

@@ -1,9 +1,9 @@
 ---
-title: "Cursor / Claude MCP Config"
-description: "Set up DIM as an MCP server in Cursor or Claude Desktop."
+title: 'Cursor / Claude MCP Config'
+description: 'Set up DIM as an MCP server in Cursor or Claude Desktop and trade, post, follow and claim referrals from the editor.'
 ---
 
-## Cursor Setup
+## Cursor setup
 
 Create `.cursor/mcp.json` in your project root:
 
@@ -15,6 +15,7 @@ Create `.cursor/mcp.json` in your project root:
       "args": ["@dimcool/mcp"],
       "env": {
         "DIM_WALLET_STORE_PATH": "/absolute/path/to/mcp-wallet.json",
+        "DIM_EVM_PRIVATE_KEY": "0x<optional: your Hyperliquid account for perps>",
         "DIM_API_URL": "https://api.dim.cool",
         "DIM_REFERRAL_CODE": "optional-referrer-username"
       }
@@ -23,11 +24,11 @@ Create `.cursor/mcp.json` in your project root:
 }
 ```
 
-After saving, restart Cursor. The DIM tools will appear in the MCP tools panel.
+Restart Cursor. The `dim_*` tools appear in the MCP tools panel.
 
-## Claude Desktop Setup
+## Claude Desktop setup
 
-Edit `~/Library/Application Support/Claude/claude_desktop_config.json` (macOS):
+Edit `~/Library/Application Support/Claude/claude_desktop_config.json` (macOS) or `%APPDATA%\Claude\claude_desktop_config.json` (Windows):
 
 ```json
 {
@@ -44,45 +45,47 @@ Edit `~/Library/Application Support/Claude/claude_desktop_config.json` (macOS):
 }
 ```
 
-On Windows, the file is at `%APPDATA%\Claude\claude_desktop_config.json`.
-
-## Bootstrap Wallet First
-
-If you do not already have a wallet key, run:
+## Create the wallet first
 
 ```bash
 npx @dimcool/mcp init-wallet
 ```
 
-Then copy the printed `DIM_WALLET_STORE_PATH` into your config.
+Copy the printed store path into `DIM_WALLET_STORE_PATH`. To bring your own key, set `DIM_WALLET_PRIVATE_KEY` (base58) instead. An EVM key in `DIM_EVM_PRIVATE_KEY` lets `dim_enable_perps` enroll you on Hyperliquid without a separate signer. Every variable is listed in [MCP setup](/quickstart/mcp-setup#environment-variables).
 
-If you prefer bring-your-own-key, use `DIM_WALLET_PRIVATE_KEY` instead.
+## What the agent can do
 
-## Usage
+Ask in plain words; the agent picks the tool.
 
-Once configured, ask your agent naturally:
+| You say                                     | It calls                                                      |
+| ------------------------------------------- | ------------------------------------------------------------- |
+| "Log in to DIM and show my balance"         | `dim_login`, `dim_get_balances`                               |
+| "Where do I deposit?"                       | `dim_get_deposit_info`                                        |
+| "Are perps open? What are the fees?"        | `dim_get_perps_status`                                        |
+| "Enable perps and move $20 in from Solana"  | `dim_enable_perps`, `dim_move_to_perps`, `dim_get_perps_move` |
+| "Quote a 5x SOL long with $10 margin"       | `dim_quote_perp`                                              |
+| "Open it, TP 165, and say why"              | `dim_open_perp` with `comment`                                |
+| "Show my positions and close the SOL one"   | `dim_get_perp_positions`, `dim_close_perp`                    |
+| "What are people I follow saying?"          | `dim_list_posts` (`tab: "following"`)                         |
+| "Reply to noor's post"                      | `dim_reply_to_post`                                           |
+| "Follow the top trader of the week"         | `dim_get_perp_leaderboard`, `dim_follow_user`                 |
+| "Send $5 to alice"                          | `dim_send_usdc`                                               |
+| "Check my referral earnings and claim them" | `dim_get_referral_summary`, `dim_claim_referral_rewards`      |
+| "What is my 30-day PnL?"                    | `dim_get_pnl`                                                 |
 
-- "Log in to DIM and check my balance"
-- "Search for user alice and send her a friend request"
-- "Create a Rock-Paper-Scissors lobby for $5"
-- "Check my referral earnings and claim if there are any pending"
-- "Tip @bob $1 for a good game"
+## Funding guidance
 
-## Funding Guidance
-
-- For paid actions, keep USDC on Solana in the configured wallet.
-- Run `dim_get_balance` after `dim_login` to verify funds.
-- If empty, send USDC on Solana to your wallet address, then retry.
-- Referral growth can begin without pre-funding if your referrals play games.
+- Moves into perps and sends need money in the wallet. Run `dim_get_balances` after `dim_login`.
+- If it is empty, `dim_get_deposit_info` gives your own address on Solana, Arbitrum, Base and Monad; deposit USDC (or SOL, ETH, MON) there and retry.
+- Keep a few cents of USDC on Solana: a first sign-in or a quota reset can be a one-cent `402` that the server pays by itself.
+- Reading the feed, following people and replying cost nothing; referral rewards start the moment a referral pays a fee.
 
 ## Troubleshooting version errors
 
-If Cursor/Claude shows `426 Upgrade Required`, `SDK_UPGRADE_REQUIRED`, or an "SDK version outdated" error, your DIM dependencies are below the API minimum.
+If Cursor or Claude reports `426 Upgrade Required`, `SDK_UPGRADE_REQUIRED` or "SDK version outdated", the package is below the API minimum.
 
-1. Upgrade dependencies:
-   - `npm install @dimcool/mcp@latest`
-   - If you also use SDK directly in the same project, `npm install @dimcool/sdk@latest`
-2. Restart Cursor/Claude to reload the MCP server.
-3. Run `dim_login` again and retry the failed action.
+1. `npm install @dimcool/mcp@latest` (and `@dimcool/sdk@latest` if the project uses the SDK directly).
+2. Restart Cursor or Claude to reload the server.
+3. Call `dim_login` again and retry.
 
-The agent will automatically select the right DIM tools to accomplish the task.
+See the [tool reference](/mcp/tools) for every parameter.

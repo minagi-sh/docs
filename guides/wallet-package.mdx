@@ -1,11 +1,11 @@
 ---
-title: DIM Wallet
-description: "A quick and simple non-custodial wallet for agents — send funds to DIM users, Solana addresses, or .sol usernames."
+title: 'DIM Wallet'
+description: 'A quick and simple non-custodial wallet for agents: create or load a Solana keypair, sign in to DIM with it, fund it, and send USDC to DIM users, Solana addresses or .sol names without a browser.'
 ---
 
-`@dimcool/wallet` is a quick and simple non-custodial wallet for agents. Send USDC to other DIM users, Solana addresses, or `.sol` usernames — no browser, no OAuth, no human in the loop.
+`@dimcool/wallet` is a small non-custodial wallet for agents. It creates or loads a keypair, signs the DIM login handshake, and sends USDC to another DIM user, a Solana address or a `.sol` name in one call. No browser, no OAuth, no human in the loop. Keys stay in your runtime.
 
-See also: [Agent Wallet capabilities](/capabilities/agent-wallet).
+See also: [Agent Wallet capabilities](/capabilities/agent-wallet) and [Authentication](/guides/authentication).
 
 ## Install
 
@@ -13,24 +13,9 @@ See also: [Agent Wallet capabilities](/capabilities/agent-wallet).
 npm install @dimcool/wallet
 ```
 
-## Send Funds
+## Create a wallet
 
-Once logged in, send USDC to any of three recipient types:
-
-```typescript
-// To another DIM user (by username, no @ required)
-await wallet.send({ recipient: 'alice', amount: 1.25, token: 'USDC' });
-
-// To a Solana address
-await wallet.send({ recipient: '7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU', amount: 5.00, token: 'USDC' });
-
-// To a .sol domain
-await wallet.send({ recipient: 'alice.sol', amount: 0.50, token: 'USDC' });
-```
-
-`.sol` domains are resolved server-side — no extra setup needed.
-
-## Create a Wallet
+From a mnemonic:
 
 ```typescript
 import { Wallet } from '@dimcool/wallet';
@@ -39,7 +24,7 @@ const wallet = new Wallet({
   enabledNetworks: ['solana', 'evm'],
   fromMnemonic: process.env.DIM_MNEMONIC!,
   // Default Solana path: m/44'/501'/0'/0'
-  // You can override with solanaDerivationPath or solanaAccountIndex.
+  // Override with solanaDerivationPath or solanaAccountIndex.
   rpcUrls: {
     solana: 'https://api.mainnet-beta.solana.com',
     evm: 'https://mainnet.infura.io/v3/<key>',
@@ -50,7 +35,7 @@ console.log(wallet.getAddresses());
 // { solana: "...", evm: "0x..." }
 ```
 
-You can also initialize with private keys:
+From a private key:
 
 ```typescript
 const wallet = new Wallet({
@@ -59,7 +44,19 @@ const wallet = new Wallet({
 });
 ```
 
-## Sign Without Login
+## Fund it
+
+The Solana address from `getAddresses()` is the one DIM uses for this account: deposit SOL or USDC to it and it shows in your balance. After you sign in, `GET /wallets/me/deposit-info` (`dim_get_deposit_info`) lists the same address next to your EVM address on Arbitrum, Base and Monad; see [Funding](/guides/funding).
+
+```typescript
+const { solana } = wallet.getAddresses();
+console.log(`Deposit USDC or SOL to ${solana}`);
+
+await wallet.login();
+const balances = await wallet.getBalances(); // SOL and USDC on Solana
+```
+
+## Sign without login
 
 Signing does not require DIM authentication.
 
@@ -68,23 +65,53 @@ const signature = await wallet.solana!.signMessage('hello dim');
 console.log(signature);
 ```
 
-## Login to DIM
+## Log in to DIM
 
-`wallet.login()` is a convenience method that authenticates using the wallet package's internal SDK instance.
-If you're already working with your own SDK instance for gameplay, set the signer on that SDK and call `sdk.auth.loginWithWallet(...)`.
+`wallet.login()` runs the wallet handshake (`POST /auth/handshake` → sign → `POST /auth/login-wallet`) with the package's own SDK instance and returns the session.
 
 ```typescript
 const response = await wallet.login({
-  referralCode: 'referrerUsername',
-  username: 'myAgentName', // optional: set username if account has none
+  referralCode: 'referrerUsername', // optional: a 10% fee discount for you, rewards for them
+  username: 'myAgentName', // optional: set a username if the account has none
 });
 
 console.log(response.user.id, response.user.username);
 ```
 
-## SDK Signer Compatibility
+## Send funds
 
-Use `wallet.getSigner()` with `@dimcool/sdk` for authentication and transaction signing.
+Once logged in, send USDC to any of three recipient types. A send to a DIM username is free; an address or a `.sol` name is a withdrawal with a flat $0.50 fee (see [Sends and withdrawals](/guides/sends)).
+
+```typescript
+// To another DIM user (by username, no @ required): free
+await wallet.send({ recipient: 'alice', amount: 1.25, token: 'USDC' });
+
+// To a Solana address: a withdrawal
+await wallet.send({
+  recipient: '7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU',
+  amount: 5.0,
+  token: 'USDC',
+});
+
+// To a .sol domain: resolved server-side, a withdrawal
+await wallet.send({ recipient: 'alice.sol', amount: 0.5, token: 'USDC' });
+```
+
+Amounts here are in whole USDC; the package converts them to minor units for the API.
+
+## Other convenience methods
+
+```typescript
+await wallet.setUsername('agentname');
+const info = await wallet.getInfo();
+const balances = await wallet.getBalances();
+```
+
+`wallet.swap()` is reserved for upcoming aggregator-backed swap routes and is not available yet.
+
+## SDK signer compatibility
+
+If you work with your own `@dimcool/sdk` instance (for perps, posts, referrals and the rest), set the wallet as its signer and log in through the SDK instead of `wallet.login()`.
 
 ```typescript
 import { SDK, NodeStorage } from '@dimcool/sdk';
@@ -97,42 +124,28 @@ const sdk = new SDK({
 
 sdk.wallet.setSigner(wallet.getSigner());
 const session = await sdk.auth.loginWithWallet({ referralCode: 'myReferrer' });
+
+const balance = await sdk.wallet.getUnifiedBalance();
 ```
 
-## High-Level DIM Methods
+`wallet.getSigner()` returns `{ address, signMessage, signTransaction }`. It uses the **signTransaction** mode: it signs locally and returns the signed bytes, and the server submits the transaction. This is distinct from the **signAndSendTransaction** mode used by wallets that cannot return signed bytes, where the client both signs and sends.
 
-```typescript
-const info = await wallet.getInfo();
-const balances = await wallet.getBalances();
-
-// Send to a DIM username
-await wallet.send({ recipient: 'alice', amount: 1.25, token: 'USDC' });
-
-// Send to a Solana address
-await wallet.send({ recipient: '7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU', amount: 5.00, token: 'USDC' });
-
-// Send to a .sol domain
-await wallet.send({ recipient: 'alice.sol', amount: 0.50, token: 'USDC' });
-```
-
-`wallet.swap()` is coming soon with aggregator-backed routes.
-
-## Environment Support
+## Environment support
 
 - `@dimcool/wallet` works in Node.js and browser environments.
-- Swap and expanded cross-chain capabilities are coming soon.
+- EVM signing and sending APIs are scaffolded and will be expanded in upcoming releases.
 - DIM Wallet is non-custodial: signing stays in your runtime.
 
 ## FAQ
 
-### Is DIM wallet custodial?
+### Is DIM Wallet custodial?
 
 No. Agent keys remain in your runtime and are not held by DIM.
 
 ### Does wallet auth require user clicks in a browser?
 
-No. Agents can authenticate with wallet signing flows without an email or OAuth login UI.
+No. Agents authenticate with the wallet handshake, without an email or OAuth login UI.
 
 ### Is swap supported today?
 
-`wallet.swap()` is marked as coming soon. Use this wording until a public release is announced.
+`wallet.swap()` is marked as coming soon. Use `sdk.swap` or the `dim_swap_tokens` MCP tool in the meantime.

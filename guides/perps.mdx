@@ -1,0 +1,359 @@
+---
+title: 'Perps trading'
+description: 'Perpetual futures on Hyperliquid through DIM: availability and rules, markets, enrolment, quoting, opening and closing, positions and fills, public trades with their pages, market activity, the leaderboard, realtime events, errors, and the SDK, MCP and REST surfaces.'
+---
+
+## What a perp on DIM is
+
+A perpetual future ("perp") is a position on a price with no expiry: **long** gains when the price rises, **short** gains when it falls, and **leverage** multiplies both. You put up a margin; the position size (notional) is the margin times the leverage; if the price moves far enough against you the position is **liquidated** and the margin is lost.
+
+Perps on DIM are traded on **Hyperliquid**, through the user's **own Hyperliquid account** (their EVM address). DIM never holds the position: it signs orders with an **agent key the user approved** at enrolment and earns a **builder fee** on each fill, charged under a ceiling the user approved. Withdrawals are owner actions: only the user's key (or, on the web, the user's Privy embedded wallet through DIM's policy-bound session signer) can move money out.
+
+`GET /perps/status` names the venue in `venue`: `hyperliquid`.
+
+<Note>
+  A development server may answer `venue: 'synthetic'`: a simulated venue on
+  live prices where positions and balances live in DIM's database and nothing
+  moves. Production is always `hyperliquid`.
+</Note>
+
+Money in this API is **integer USDC minor units** (6 decimals) as decimal strings; prices and percentages are numbers; every time is ms since the epoch except `marks[].time` (unix seconds).
+
+## Availability and rules
+
+`GET /perps/status` (optional auth) answers whether perps are available to the visitor and, when they are not, why; most decisive reason first:
+
+| `disabledReason` | Meaning                                                                                                                     | Code on every other route  |
+| ---------------- | --------------------------------------------------------------------------------------------------------------------------- | -------------------------- |
+| `flag`           | The `enable-perps` feature flag is off. It is seeded off and fail-closed: an unreadable flag is off                         | `503 PERPS_DISABLED`       |
+| `region`         | The visitor's country (read from the edge headers `cf-ipcountry` / `x-vercel-ip-country`, never from the client) is blocked | `503 PERPS_REGION_BLOCKED` |
+| `venue`          | No listed market has a fresh mark (older than 5 s by default), or the venue cannot be read                                  | `503 PERPS_VENUE_DOWN`     |
+
+In production a visitor the edge could not place is refused too. The status itself never answers 503: it says why. Every other `/perps/*` route checks availability first, except the two that only finish a move already started (`/transfers/:id/legs/:index/submit` and `/transfers/:id/resume`).
+
+The status also carries:
+
+- `rules`: the policy numbers below. **Never hardcode them.**
+- `enrollment`: the terms of enrolment on the real venue (`signerId`, `policyIds`, `builderMaxFeeRate` such as `'0.1%'`, `builderMaxFeeBps`, `builderFeeBps`, `consentVersion`, and for the signed-in caller `state` `none | enrolling | active` and `acceptedConsentVersion`).
+- `funding`: `{ routed, networks }`, where `networks` lists the networks open for deposits (`solana`, `arbitrum`, `base`, `monad`). See [Funding](/guides/funding).
+
+| Rule                 | Default                                          | Field                 |
+| -------------------- | ------------------------------------------------ | --------------------- |
+| Leverages offered    | 2, 3, 5, 10, 20 (a market caps them at its own)  | `leverages`           |
+| Max leverage         | Per market, from the venue                       | `market.maxLeverage`  |
+| Minimum size         | $10 of position size (notional)                  | `minNotional`         |
+| Venue taker fee      | 4.5 bps of the position size                     | `takerFeeBps`         |
+| DIM builder fee      | 5 bps of the position size, under a 0.1% ceiling | `builderFeeBps`       |
+| Minimum move in      | $10                                              | `minDeposit`          |
+| Minimum withdrawal   | $5                                               | `minWithdraw`         |
+| Withdrawal fee       | $1 flat, charged by the venue                    | `withdrawFee`         |
+| Bridge fee           | 10 bps of the amount moved                       | `bridgeFeeBps`        |
+| Slippage options     | 10, 50, 100, 200 bps; 50 by default              | `slippageOptionsBps`  |
+| Default slippage     | 50 bps                                           | `defaultSlippageBps`  |
+| Maintenance fraction | 0.1 of the margin                                | `maintenanceFraction` |
+| Venue name           | `Hyperliquid`                                    | `venue`               |
+
+Leverage must be a whole number. Routed moves pass Relay's route fee and the venue's withdrawal fee through; each move quote shows them ([Funding](/guides/funding#fees-and-minimums)).
+
+```bash
+curl https://api.dim.cool/perps/status
+# { "enabled": true, "disabledReason": null, "venue": "hyperliquid",
+#   "enrollment": { "consentVersion": "2026-10-18", "builderMaxFeeRate": "0.1%", "builderFeeBps": 5, "state": "none", ... },
+#   "rules": { "leverages": [2,3,5,10,20], "minNotional": "10000000", "takerFeeBps": 4.5, "builderFeeBps": 5, ... },
+#   "funding": { "routed": true, "networks": ["solana","arbitrum","base","monad"] } }
+```
+
+## Markets
+
+`GET /perps/markets` (optional auth) lists the venue's highest-volume coins (the top 30 by the day's volume by default) plus the coins DIM always lists (`BTC`, `ETH`, `SOL`, `WIF`, `kBONK`, `JUP`, `JTO`, `PYTH`, `POPCAT` by default) and any coin DIM pins; a coin DIM hides or the venue delists drops out.
+
+| Query       | Values                                                         | Meaning                                              |
+| ----------- | -------------------------------------------------------------- | ---------------------------------------------------- |
+| `sort=`     | `oi` (open interest, default) or `volume`                      | Order of the list                                    |
+| `category=` | `crypto`, `meme`, `stock`, `index`, `commodity`, `fx`, `other` | Only that kind of market                             |
+| `q=`        | text                                                           | Matches the coin, symbol or name, case-insensitively |
+
+`GET /perps/markets/:coin` returns one market, `404 not-found` when the venue does not list it.
+
+- **Coins are the venue's own names and are case-sensitive.** Pass them exactly as the list spells them. A `k` prefix means one contract is 1,000 units: `kBONK` is 1,000 BONK and its mark is the price of 1,000 BONK (`symbol: 'BONK'`, `unitsPerContract: 1000`).
+- Every market carries DIM's `category` and, when the coin also trades as a spot token on DIM, the `assetId` it is the perp of (`solana:native` for SOL, the BONK mint for `kBONK`, `null` for BTC). Agent tools expose the same field as `spotAssetId`.
+- The mark and the chart are **price-feed markets**, not perps routes: each perp is `perp:<COIN>` (`perp:SOL`, `perp:kBONK`), served in `marketId`. Read and watch it with the [market data](/guides/prices) endpoints and events.
+
+```typescript
+// PerpMarket
+{ coin, name, icon?, symbol?, unitsPerContract?, marketId?, category, assetId,
+  maxLeverage, mark, change24h, fundingRate, openInterest, volume24h, series: number[] }
+```
+
+## Enable and enrol
+
+Perps are off for an account until it is enrolled. Until then `GET /perps/account` reads zeros with `enabled: false`, and quotes, orders and moves answer `not-found`.
+
+Enrolment approves two owner actions on the user's Hyperliquid account, both EIP-712 typed data signed by the user's EVM key: **approve DIM's agent key** (which then signs orders) and **approve the builder fee** at the ceiling in `enrollment.builderMaxFeeRate`. It also records the **consent version** the user accepted (`enrollment.consentVersion`, bumped whenever the consent text or what the server may sign changes; an account on an older version is asked again, and `consent-outdated` is the refusal).
+
+**Web users** (Privy session): `POST /perps/enable { identityToken, consentVersion }`. The server reads the embedded EVM wallet from the Privy identity token and signs the approvals through its session signer. Idempotent and resumable: calling it again picks up where it stopped.
+
+**Accounts holding their own EVM key** (agents, the SDK, Hyperliquid traders), two steps:
+
+1. `POST /perps/enroll/self { consentVersion }` returns `{ address, actions, expiresInSeconds }`: the Hyperliquid account (the account's primary EVM wallet) and the typed data to sign, one action per `kind` (`approveAgent`, `approveBuilderFee`). `actions` is empty when the account is already set up. The account needs an EVM wallet linked first (`evm-wallet-required` otherwise; `sdk.walletLinks`, or the `dim_link_wallet` tool).
+2. `POST /perps/enroll/self/complete { approveAgent?, approveBuilderFee? }` with the signatures (0x hex), by action kind. Prepare again after `expiresInSeconds` (`enrollment-expired`).
+
+```typescript
+// `wallet` is a @dimcool/wallet instance with an EVM key
+const status = await sdk.perps.status();
+const account = await sdk.perps.enrollSelf(
+  status.enrollment!.consentVersion,
+  ({ domain, types, message }) =>
+    wallet.ethereum!.signTypedData(domain, types, message),
+); // prepares, signs every action, completes
+```
+
+**`deposit-required`.** Hyperliquid refuses every action on an account, the agent approval included, until that account has received its first deposit. Enrolment then stays `enrolling` and resumes by itself once funds arrive, so fund the perps balance (below) and enable again. One perps action per user runs at a time: a second one meanwhile is `action-in-flight`.
+
+## Fund the perps balance
+
+Money moves into perps from any of the user's balances (USDC or SOL on Solana, USDC or ETH on Arbitrum or Base, USDC or MON on Monad) and out to the user's home network as USDC, each move a quoted set of steps routed through Relay that ends in the user's own wallets: `POST /perps/transfers/quote`, `/transfers/in`, `/transfers/out`, `GET /perps/transfers`, `/transfers/:id`, and `/transfers/:id/legs/:index/submit` and `/transfers/:id/resume` to finish one. The unified balance, deposit addresses, states, steps, fees and errors are in [Funding](/guides/funding).
+
+## Quote, open, close
+
+The ticket is the same body for a quote and an order. `amount` is the **margin**:
+
+| Field         | Type                      | Meaning                                                           |
+| ------------- | ------------------------- | ----------------------------------------------------------------- |
+| `coin`        | string                    | The venue's coin, case-sensitive                                  |
+| `side`        | `long` \| `short`         |                                                                   |
+| `amount`      | string                    | Margin, USDC minor units                                          |
+| `leverage`    | integer                   | One of `rules.leverages`, at most `market.maxLeverage`            |
+| `takeProfit`  | number, optional          | Trigger price that closes the position in profit; public on DIM   |
+| `stopLoss`    | number, optional          | Trigger price that closes the position at a loss; public on DIM   |
+| `slippageBps` | integer 0–5000, optional  | How far the order may fill from the mark (`defaultSlippageBps`)   |
+| `orderType`   | `market` (default)        | Market orders are what the app and the tools send                 |
+| `comment`     | string ≤ 280, orders only | Posted as the trader's post about the coin (see "Reading trades") |
+
+- **Size** = margin × leverage. **Open fee** = size × (`takerFeeBps` + `builderFeeBps`), 9.5 bps at the defaults: a $20 margin at 5× is a $100 position and a $0.095 fee ($0.05 of it DIM's builder fee). Margin plus fee leave the perps balance; the fee is realized at once.
+- **Liquidation**: the venue liquidates when the margin left falls to the maintenance level. `liquidationPrice` on a quote or position is an estimate; on Hyperliquid the account is cross-margined, so it is computed on the whole account and a second order on a coin already open is quoted as the joined position.
+
+`POST /perps/quote` prices the ticket and is **always a 200**: a ticket that would be refused comes back with `reject` set and the numbers that explain it.
+
+| `reject`       | Meaning                                                 |
+| -------------- | ------------------------------------------------------- |
+| `closed`       | The market has no fresh mark                            |
+| `max-leverage` | Above the market's `maxLeverage`                        |
+| `min-notional` | Size below `rules.minNotional`                          |
+| `insufficient` | Margin plus open fee above the account's `withdrawable` |
+
+```typescript
+// PerpQuote
+{
+  (coin,
+    side,
+    price,
+    amount,
+    leverage,
+    notional,
+    margin,
+    fee,
+    liquidationPrice,
+    reject,
+    quotedAt);
+}
+```
+
+`POST /perps/orders` opens the position from the ticket's **inputs, never the quote**: the server prices it again at the mark, places an IOC order at mark ± slippage through the agent key, and answers the position. A rejected ticket is a `400` with the reject code.
+
+`POST /perps/positions/:id/close` closes the whole position at the mark and answers the fill. Take profit, stop loss and liquidation are the venue's own triggers; the resulting fill carries `reason` `take-profit`, `stop-loss` or `liquidated` (`closed` for a manual close). A close needs a fresh mark for the market (`503 PERPS_VENUE_DOWN` without one).
+
+```typescript
+const rules = await sdk.perps.rules();
+const ticket = {
+  coin: 'SOL',
+  side: 'long' as const,
+  amount: '20000000', // $20 margin
+  leverage: 5,
+  takeProfit: 200,
+  slippageBps: rules.defaultSlippageBps,
+};
+const quote = await sdk.perps.quote(ticket);
+if (!quote.reject) {
+  const position = await sdk.perps.open({ ...ticket, comment: 'SOL to 200' });
+  const fill = await sdk.perps.close(position.id);
+}
+```
+
+Partial closes and limit orders are not offered yet.
+
+## Positions, fills, account
+
+Signed in, the account's own view:
+
+| Route                                   | Answer                                                                                                                                                                                                                                                |
+| --------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `GET /perps/account`                    | `{ balance, marginUsed, withdrawable, unrealized, realized, enabled }`                                                                                                                                                                                |
+| `GET /perps/positions?coin=`            | Open positions: `id, coin, icon?, side, leverage, notional, margin, entryPrice, markPrice, liquidationPrice, unrealized, unrealizedPct, takeProfit?, stopLoss?, openedAt`. `markPrice` is the mark when read; watch `perp:<COIN>` for the live one    |
+| `GET /perps/fills?coin=&before=&limit=` | Closed rounds, newest first (50; `limit` 1–100; `before` = the last row's `closedAt` pages back): `id, positionId, coin, side, leverage, notional, margin, entryPrice, exitPrice, realized, realizedPct, fee, builderFee, reason, openedAt, closedAt` |
+| `GET /perps/transfers`                  | Moves in and out, newest first (50)                                                                                                                                                                                                                   |
+
+Anyone's, public (optional auth; `mine` marks the viewer's own rows):
+
+| Route                                               | Answer                                                                                                                                                                                               |
+| --------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `GET /perps/people/:userId/positions`               | Their open positions, newest first, priced at the mark: `positionId, coin, side, leverage, notional, entryPrice, markPrice, liquidationPrice, takeProfit, stopLoss, openedAt, pnl, pnlPct, comment?` |
+| `GET /perps/people/:userId/fills?before=&limit=`    | Their closed rounds, newest first, shaped like `/perps/fills` (20; `limit` up to 50)                                                                                                                 |
+| `GET /perps/people/:userId/trades?from=&to=&limit=` | Their trades, open and closed, opened or closed inside `[from, to)` (unix seconds), oldest first: the pins on a PnL chart (100; `limit` up to 200; no window reads the newest)                       |
+
+## Reading trades
+
+A perp round is a **trade** with an identity of its own: `id` is the position's row id (the `positionId` on fills, people positions and marks), and it stays the same open or closed.
+
+- `GET /perps/trades/:id` (public): who (`userId`, `username`, `avatar`), `coin`, `symbol`, `unitsPerContract`, `icon`, `marketId`, `side`, `leverage`, `notional`, `margin`, `entryPrice`, `markPrice` (live while open), `liquidationPrice`, `takeProfit`, `stopLoss`, `status` (`open`, `closed`, `liquidated`, `take-profit`, `stop-loss`), `openedAt`, `closedAt`, `exitPrice`, `realized` (once closed), `pnl` and `pnlPct` (unrealized at the mark while open, realized after), `fee`, `builderFee`, `comment?`, `mine?`. `404 not-found` for an id that is not a trade.
+- `GET /perps/trades/recent?limit=&sort=&days=` (public): the latest closed rounds across every trader, newest first, each a fill plus `who` (20; `limit` 1–50). `sort=best` ranks them by realized result and `days` (1–90) keeps only the rounds closed in the last so many days: the best trades of the week is `?sort=best&days=7`.
+
+Every trade has a **public page** at `https://dim.cool/app/trades/<id>`, readable signed out. Its **share link** adds `?ref=<trader username>`, so a visitor who signs up from it joins as the trader's [referral](/guides/referrals) (first touch wins: a code already captured is kept; a visitor who arrives without a code adopts the trader too). The server draws a **card image** for the link at `https://dim.cool/og/t/<id>.png` (1200 × 630), which is what social networks show.
+
+The `comment` sent with an order becomes the trader's **post** about the coin, tied to the position: it is the first post on the position, the words on the position's bubble on the market chart and in the market's column, and the head of the thread under the trade. Posts about a perp are shared with its spot token (`GET /posts/tokens/perp:SOL` and `GET /posts/tokens/solana:native` read the same list); write one later with `POST /posts { text, perpCoin }` or about your own position with `{ text, perpPositionId }`. See [Posts](/guides/posts).
+
+## Market activity and holders
+
+What DIM's traders are doing on one market, public (optional auth; `mine` on the viewer's rows). Only positions opened on DIM are shown: the venue's own order flow carries addresses, not people.
+
+| Route                                             | Answer                                                                                                                                                                                                                                                                                               |
+| ------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `GET /perps/markets/:coin/activity`               | The market's column: who opened, closed or was liquidated, newest first (60 rows): `id, positionId, at, who, kind (open \| close \| liquidated), side, leverage, notional, price, result?, comment?`                                                                                                 |
+| `GET /perps/markets/:coin/holders`                | Who has a position open now, largest first (50): `who, side, leverage, notional, entryPrice, unrealizedPct`                                                                                                                                                                                          |
+| `GET /perps/markets/:coin/marks?from=&to=&limit=` | Every position as a chart bubble: `positionId, time (unix seconds), value (entry), side, author, notional, leverage, takeProfit, stopLoss, status (open \| closed \| liquidated), pnl, pnlPct, exitPrice?, closedAt?, comment?` (the latest 40, or up to 200 opened **or closed** inside the window) |
+| `GET /perps/markets/:coin/trades?limit=&days=`    | The market's trades, open and closed, anyone's, ranked by result (realized once closed, at the mark while open), each shaped like `/perps/trades/:id` (10; `limit` up to 50; `days` 1–90)                                                                                                            |
+
+Take profit and stop loss are public on every bubble, with the position's result and comment.
+
+## Leaderboard
+
+`GET /perps/leaderboard?period=24h|7d|30d|all&limit=&userIds=` (public; `period` defaults to `7d`, `limit` 1–100, default 50) ranks people by what their perps made over the period: `pnl` = `realized` on the rounds closed in it plus `unrealized` on what is open now, ties by `volume`. Each entry: `rank`, `user` (`id`, `username`, `avatar`, `bio`), `followers`, `pnl`, `realized`, `unrealized`, `volume`, `trades`, `wins`, `winRate`, `open`. Signed in, every row says `followedByYou` and `you` is the viewer's own row even past `limit`. `userIds=a,b` (up to 50) keeps the board to those people, ranks kept. Banned users and DIM's house accounts never rank; the board is cached a minute (`asOf`).
+
+The spot-swap ranking, which counts token swaps only, is `GET /trades/leaderboard` ([Trades and PnL](/guides/trades)).
+
+## Real-time
+
+Socket.IO on the root namespace, same connection as the rest of the API. Account events go to the viewer's own `user:<id>` room, joined on connect. A market's crowd is the `perps:<COIN>` room: emit `join-perps-market` with the coin (`leave-perps-market` to stop); the server uses the venue's exact coin (`perps:kBONK`). Every payload carries `_serverTs`.
+
+| Event                    | Room           | Payload                                                                             |
+| ------------------------ | -------------- | ----------------------------------------------------------------------------------- |
+| `perps:account:updated`  | `user:<id>`    | `{ account }` after an order, a close or a move                                     |
+| `perps:position:opened`  | `user:<id>`    | `{ position }`                                                                      |
+| `perps:position:closed`  | `user:<id>`    | `{ fill }`, by you or by the venue (TP, SL, liquidation)                            |
+| `perps:transfer:updated` | `user:<id>`    | `{ transfer }` on every change to a move in or out                                  |
+| `perps:activity`         | `perps:<COIN>` | `{ coin, event }`: one row of the market column, also sent to its author's own room |
+
+Marks are **not** perps events: join `price:perp:<COIN>` on the [price feed](/guides/prices#realtime-ticks) and revalue positions on each tick. The SDK's `createPerpsSessionController()` keeps account, positions, fills and transfers live from these events, and `createPerpMarketSessionController(coin)` joins a market and keeps its activity, holders and marks.
+
+## Errors and refusal codes
+
+Every refusal is a `{ code, message }` body; the SDK maps `code` to `PerpError.reason`.
+
+| Code                                                                                | Status | Meaning                                                                                                     |
+| ----------------------------------------------------------------------------------- | ------ | ----------------------------------------------------------------------------------------------------------- |
+| `PERPS_DISABLED`                                                                    | 503    | The `enable-perps` flag is off                                                                              |
+| `PERPS_REGION_BLOCKED`                                                              | 503    | Not available in the visitor's region                                                                       |
+| `PERPS_VENUE_DOWN`                                                                  | 503    | No fresh marks, a close without a fresh mark, or the venue cannot be read                                   |
+| `not-found`                                                                         | 404    | Unlisted coin, a trade or position that does not exist or is not yours, or perps not enabled on the account |
+| `closed`                                                                            | 400    | The market has no fresh mark                                                                                |
+| `max-leverage`                                                                      | 400    | Above the market's `maxLeverage`                                                                            |
+| `min-notional`                                                                      | 400    | Size below `minNotional`                                                                                    |
+| `insufficient`                                                                      | 400    | Margin plus fee above `withdrawable`, or a withdrawal above it                                              |
+| `min-deposit`                                                                       | 400    | A move in below `minDeposit`                                                                                |
+| `min-withdraw`                                                                      | 400    | A withdrawal below `minWithdraw`                                                                            |
+| `unsupported-order`                                                                 | 400    | An order the venue adapter does not place                                                                   |
+| `action-in-flight`                                                                  | 400    | Another perps action of this user is running; one at a time                                                 |
+| `consent-outdated`                                                                  | 400    | `consentVersion` is missing or not the current one                                                          |
+| `privy-session-required`                                                            | 400    | `POST /perps/enable` without a Privy identity token: use self enrolment                                     |
+| `identity-invalid`, `login-wallet-mismatch`, `evm-wallet-missing`, `signer-missing` | 400    | The Privy identity token did not verify, is another user's, or its wallet lacks DIM's signer                |
+| `evm-wallet-required`                                                               | 400    | Self enrolment on an account with no EVM wallet linked                                                      |
+| `enrollment-expired`                                                                | 400    | The typed data was prepared too long ago, or never: prepare again                                           |
+| `signature-invalid`                                                                 | 400    | A signature is missing or does not match what was prepared                                                  |
+| `evm-address-changed`, `evm-address-taken`                                          | 400    | The account is enrolled with another address, or the address belongs to another DIM user                    |
+| `deposit-required`                                                                  | 400    | The venue refuses actions until the account's first deposit; enrolment resumes after it                     |
+| `venue-refused`                                                                     | 400    | The venue refused a master action (agent or builder-fee approval)                                           |
+| any other answer                                                                    | any    | SDK reason `rejected` (validation: a non-integer leverage, a malformed amount)                              |
+| no answer                                                                           | n/a    | SDK reason `network`                                                                                        |
+
+Moving money adds `route-unavailable`, `expired`, `origin-failed`, `not-resumable` and `unsupported-asset`: see [Funding](/guides/funding#errors).
+
+## SDK
+
+`sdk.perps` in `@dimcool/sdk`. Coins are passed verbatim; money is strings (or bigint where noted).
+
+| Method                                                                                                                                                                                                         | Route                                                      |
+| -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------- |
+| `status()`, `rules()` (memoised a minute)                                                                                                                                                                      | `GET /perps/status`                                        |
+| `markets({ sort?, category?, q? })`, `market(coin)` (null when unlisted)                                                                                                                                       | `GET /perps/markets`, `/markets/:coin`                     |
+| `activity(coin)`, `holders(coin)`, `marks(coin, { from, to, limit }?)`, `tradesOn(coin, { days, limit }?)`                                                                                                     | `GET /perps/markets/:coin/*`                               |
+| `positionsOf(userId)`, `fillsOf(userId, { before, limit }?)`, `tradesOf(userId, { from, to, limit }?)`                                                                                                         | `GET /perps/people/:userId/*`                              |
+| `trade(id)`, `recentTrades(limit \| { sort, days, limit })`                                                                                                                                                    | `GET /perps/trades/:id`, `/trades/recent`                  |
+| `leaderboard({ period, limit, userIds }?)`                                                                                                                                                                     | `GET /perps/leaderboard`                                   |
+| `enable(body?)`                                                                                                                                                                                                | `POST /perps/enable`                                       |
+| `prepareSelfEnrollment(consentVersion)`, `completeSelfEnrollment(signatures)`, `enrollSelf(consentVersion, sign)`                                                                                              | `POST /perps/enroll/self`, `/enroll/self/complete`         |
+| `account()`, `positions()`, `fills()`, `fillsPage(query)`, `transfers()`                                                                                                                                       | `GET /perps/account`, `/positions`, `/fills`, `/transfers` |
+| `quote(ticket)`, `open(ticket)`, `close(positionId)`                                                                                                                                                           | `POST /perps/quote`, `/orders`, `/positions/:id/close`     |
+| `quoteMove(direction, amount, opts?)`, `moveIn(amount, opts?)`, `moveOut(amount, opts?)`, `signMove(transfer)`, `moveInAndSign(amount, opts?)`, `submitLeg(id, index, body)`, `transfer(id)`, `resumeMove(id)` | `/perps/transfers/*`                                       |
+| `createPerpsSessionController()`, `createPerpMarketSessionController(coin)`, `observePerps*()`, `observePerpMarket(coin)`                                                                                      | socket sessions                                            |
+
+`perpMarketId('SOL')` is `'perp:SOL'`. Errors are `PerpError` with `reason` and, for the 503 gates, `unavailable` and `disabledReason`. See the [SDK README](https://github.com/dimcool/dim/tree/main/packages/sdk#perps-sdkperps).
+
+## MCP
+
+Agent tools take dollars and answer every amount as minor units plus a formatted string. In external-signer mode an action that needs the user's key answers `needsSigning` with what to sign and `confirmWith`.
+
+| Tool                                                                                                                                                     | Purpose                                                                                                                                |
+| -------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
+| `dim_get_perps_status`                                                                                                                                   | Availability, the venue and the rules, with the fees spelled out                                                                       |
+| `dim_list_perp_markets`                                                                                                                                  | `{ sort?, category?, search? }`: markets with the mark, max leverage, funding, category and `spotAssetId`                              |
+| `dim_enable_perps`                                                                                                                                       | Enrol: with an EVM key configured it links it and signs the approvals itself, otherwise it returns the typed data to sign              |
+| `dim_complete_perps_enrollment`                                                                                                                          | `{ approveAgent?, approveBuilderFee? }`: the signatures of what `dim_enable_perps` returned                                            |
+| `dim_list_wallets`, `dim_link_wallet`                                                                                                                    | The account's Solana and EVM wallets; link the EVM key self enrolment needs                                                            |
+| `dim_get_perps_account`                                                                                                                                  | The perps balance                                                                                                                      |
+| `dim_get_perp_positions`                                                                                                                                 | `{ includeFills?, coin?, fillsBefore?, fillsLimit? }`: open positions, and closed rounds paged back                                    |
+| `dim_quote_perp`                                                                                                                                         | `{ coin, side, sizeUsd, leverage, takeProfit?, stopLoss? }`: price a ticket (`sizeUsd` is the **margin**)                              |
+| `dim_open_perp`                                                                                                                                          | Same parameters plus `comment?`: quotes first, refuses with the reason on a reject, then opens                                         |
+| `dim_close_perp`                                                                                                                                         | `{ positionId }`                                                                                                                       |
+| `dim_get_perp_market_activity`                                                                                                                           | `{ coin, limit? }`: DIM traders' positions on a market with TP, SL, PnL and comments, the latest opens and closes                      |
+| `dim_get_perp_trades_of`                                                                                                                                 | `{ user, before?, limit? }`: one user's closed rounds, paged with `nextBefore`                                                         |
+| `dim_get_recent_perp_trades`                                                                                                                             | `{ limit?, sort?, days? }`: the latest closed rounds across every trader; `sort: 'best'` with `days` ranks a window by realized result |
+| `dim_get_perp_leaderboard`                                                                                                                               | `{ period?, limit? }`: traders ranked by perps PnL                                                                                     |
+| `dim_move_to_perps`, `dim_withdraw_from_perps`, `dim_quote_perps_move`, `dim_get_perps_move`, `dim_submit_perps_move_signature`, `dim_resume_perps_move` | Moving money: see [Funding](/guides/funding)                                                                                           |
+
+The loop for an agent: `dim_get_perps_status` → `dim_enable_perps` → `dim_move_to_perps` → `dim_quote_perp` → `dim_open_perp` → `dim_get_perp_positions` → `dim_close_perp`. Full parameters in the [MCP tools reference](/mcp/tools#perps).
+
+## REST
+
+Every route except the status and the two that finish a move answers `503` with the availability codes first. Optional auth: a bearer token adds `mine` and `followedByYou`; Required: `JwtAuthGuard` ([authentication](/guides/authentication)).
+
+| Method | Path                                            | Auth     | Purpose                                                           |
+| ------ | ----------------------------------------------- | -------- | ----------------------------------------------------------------- |
+| GET    | `/perps/status`                                 | Optional | `{ enabled, disabledReason, venue, enrollment, rules, funding }`  |
+| GET    | `/perps/markets?sort=&category=&q=`             | Optional | The listed markets                                                |
+| GET    | `/perps/markets/:coin`                          | Optional | One market                                                        |
+| GET    | `/perps/markets/:coin/activity`                 | Optional | The market column                                                 |
+| GET    | `/perps/markets/:coin/holders`                  | Optional | Open positions on the market, largest first                       |
+| GET    | `/perps/markets/:coin/marks?from=&to=&limit=`   | Optional | Positions as chart bubbles                                        |
+| GET    | `/perps/markets/:coin/trades?limit=&days=`      | Optional | The market's trades ranked by result                              |
+| GET    | `/perps/people/:userId/positions`               | Optional | Someone's open positions                                          |
+| GET    | `/perps/people/:userId/fills?before=&limit=`    | Optional | Someone's closed rounds                                           |
+| GET    | `/perps/people/:userId/trades?from=&to=&limit=` | Optional | Someone's trades in a window                                      |
+| GET    | `/perps/trades/recent?limit=&sort=&days=`       | Optional | Latest or best closed rounds platform-wide                        |
+| GET    | `/perps/trades/:id`                             | Optional | One trade                                                         |
+| GET    | `/perps/leaderboard?period=&limit=&userIds=`    | Optional | Traders ranked by perps PnL                                       |
+| GET    | `/perps/account`                                | Required | The perps balance                                                 |
+| POST   | `/perps/enable`                                 | Required | `{ identityToken?, consentVersion? }`: enrol with a Privy session |
+| POST   | `/perps/enroll/self`                            | Required | `{ consentVersion }`: typed data for the account's own EVM key    |
+| POST   | `/perps/enroll/self/complete`                   | Required | `{ approveAgent?, approveBuilderFee? }`: the signatures           |
+| GET    | `/perps/positions?coin=`                        | Required | Your open positions                                               |
+| GET    | `/perps/fills?coin=&before=&limit=`             | Required | Your closed rounds                                                |
+| GET    | `/perps/transfers`                              | Required | Your moves in and out                                             |
+| POST   | `/perps/quote`                                  | Required | Price a ticket (200 with `reject` when refused)                   |
+| POST   | `/perps/orders`                                 | Required | Open a position from the ticket's inputs                          |
+| POST   | `/perps/positions/:id/close`                    | Required | Close at the mark; answers the fill                               |
+| POST   | `/perps/transfers/quote`                        | Required | `{ direction?, amount, network?, asset? }`: preview a move        |
+| POST   | `/perps/transfers/in`                           | Required | `{ amount, network?, asset?, idempotencyKey? }`                   |
+| POST   | `/perps/transfers/out`                          | Required | `{ amount, idempotencyKey? }` to the home network                 |
+| GET    | `/perps/transfers/:id`                          | Required | One move: `state`, `steps`, `resting`, `canResume`                |
+| POST   | `/perps/transfers/:id/legs/:index/submit`       | Required | `{ signedTransaction }`, `{ signature }` or `{ txHashes }`        |
+| POST   | `/perps/transfers/:id/resume`                   | Required | Continue a move with `canResume`                                  |

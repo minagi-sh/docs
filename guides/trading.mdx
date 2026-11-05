@@ -1,0 +1,173 @@
+---
+title: 'Spot tokens and holdings'
+description: "Token data on DIM: trending Solana tokens, token detail, charts, the latest trades by DIM users, tokenized stocks and a person's holdings across their wallets, through the API, the SDK and the agent tools."
+---
+
+## Overview
+
+The `/trade/*` routes are the public read side of spot tokens: what is trending on Jupiter, one token's metadata and price, its USD candles, the latest confirmed trades DIM users made on it, tokenized stocks, and what a person holds across their wallets. Buying and selling is the [swapper](/guides/swap); positions, cost basis and PnL are [Trades and PnL](/guides/trades).
+
+All routes are public (a bearer token is optional) except `GET /trade/holdings/me`. Token amounts are base units as strings with their `decimals`; USD figures are numbers.
+
+<Note>
+  Token data and swaps need Solana mainnet. On a devnet or testnet deployment
+  prices and charts still load, but swaps are disabled with `disabledReason:
+  'network'`.
+</Note>
+
+## Asset ids
+
+Every token record carries an `assetId` in the price feeds' market-id scheme: `solana:native` for native SOL, `solana:<mint>` for an SPL token, `evm:<chainId>:native` and `evm:<chainId>:<address>` for the EVM wallet's rows. Native SOL and the Wrapped SOL SPL token trade at the same price but are different assets: search lists **Solana** (`kind: 'native'`, price and 24h change from the wrapped token, volume, liquidity, market cap and holders empty) ahead of **Wrapped SOL**, and a wallet holding both shows two rows. Routes keyed by `:id` take an asset id or a bare mint. DIM's own trade history is stored by mint, so native SOL's trades are the Wrapped SOL mint's rows. `parseAssetId`, `assetIdOf` and `jupiterMintOf` (native SOL → the Wrapped SOL mint, for quotes and swaps) are exported by `@dimcool/sdk`.
+
+## Trending, search and detail
+
+| Route                                                        | Answer                                                                                                                                                              |
+| ------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `GET /trade/tokens/trending?interval=5m\|1h\|6h\|24h&limit=` | Tokens trending on Jupiter in the window (default `1h`; `limit` 1–50)                                                                                               |
+| `GET /trade/tokens/search?q=`                                | Search by symbol, name or mint; a chain's native coin comes first when the query names it                                                                           |
+| `GET /trade/tokens/:id`                                      | One token by asset id or bare mint                                                                                                                                  |
+| `GET /trade/tokens/stocks`                                   | Tokenized stocks: tokens Jupiter tags as stocks (`xstock` by default, `STOCK_TOKEN_TAGS`) plus DIM's curated `STOCK_TOKEN_MINTS`, deduped, largest market cap first |
+
+```typescript
+// TradeToken
+{ mint, assetId, kind, chain: 'solana', symbol, name, icon, decimals,
+  usdPrice, priceChange24h, volume24h, liquidity, mcap, holderCount, organicScore, isVerified,
+  tags: string[] } // 'stock' is added to every tokenized stock
+```
+
+Tokenized stocks trade like any other token; their price follows the underlying share during market hours.
+
+## Chart
+
+`GET /trade/tokens/:id/chart?timeframe=1H|1D|1W|1M|1Y` (default `1D`) answers USD candles for the token's deepest pool:
+
+```typescript
+{ mint, assetId, timeframe, currency: 'usd', poolAddress,
+  candles: [{ time, open, high, low, close, volume }] }
+```
+
+`candles` is empty when no liquidity pool is indexed yet. For a live chart that pages back and moves with every tick, use the token's `assetId` as a market id on the [market data](/guides/prices) endpoints (`GET /prices/markets/:id/candles`, the `price:<marketId>` room): the `/trade` chart is a one-shot read.
+
+## Latest trades by DIM users
+
+Every confirmed swap on DIM is recorded, so the API can tell, for any token, who bought or sold it and when.
+
+| Route                                      | Answer                                                                            |
+| ------------------------------------------ | --------------------------------------------------------------------------------- |
+| `GET /trade/tokens/:id/trades?limit=`      | Confirmed trades by DIM users on the token, newest first (`limit` 1–100)          |
+| `GET /trade/trades/recent?limit=`          | The latest confirmed trades across all tokens                                     |
+| `GET /trade/users/:username/trades?limit=` | A user's confirmed trades across all tokens, newest first (default 20, up to 100) |
+
+```typescript
+// RecentTrade / TokenTrade
+{ id, user: { id, username, avatarUrl }, mint,
+  side: 'BUY' | 'SELL', tokenAmount, tokenDecimals,
+  counterMint, counterAmount, counterDecimals,
+  usdValue, priceUsd, signature, confirmedAt,
+  tokenSymbol, tokenIcon, counterSymbol }
+```
+
+`BUY` means the user received the token, `SELL` that they paid with it. The same fills, with fees, market cap, realized PnL, cursors and filters, are the trade events under `/trades/*` ([Trades and PnL](/guides/trades)).
+
+## Holdings
+
+A person's holdings span every wallet of their account: SOL plus SPL and Token-2022 tokens on Solana, and the native coin and USDC of the EVM wallet on Arbitrum, Base and Monad. Each row names its `network` and `chain`, carries an `assetId`, and the `marketId` of its price feed so a client can revalue the wallet as prices move. Holdings are read on-chain and cached for a minute; priced tokens worth under a cent are dropped.
+
+| Route                                                | Auth     | Answer                                                           |
+| ---------------------------------------------------- | -------- | ---------------------------------------------------------------- |
+| `GET /trade/holdings/me?minUsd=&limit=`              | Required | The signed-in user's holdings, even before a username is claimed |
+| `GET /trade/holdings/:userId?minUsd=&limit=`         | Optional | A user's holdings by id                                          |
+| `GET /trade/users/:username/holdings?minUsd=&limit=` | Optional | The same by username                                             |
+
+`minUsd` hides tokens worth less than that (above zero, unpriced tokens too) and `limit` (1–500) caps the list; both shrink `tokens` only, `totalUsd`, `dayChangeUsd` and `tokenCount` always describe the whole wallet.
+
+```typescript
+// UserHoldings
+{ userId, username, walletAddress, totalUsd, dayChangeUsd, tokenCount, updatedAt,
+  tokens: [{ mint, assetId, kind, chain, network, marketId, symbol, name, icon, decimals,
+             isNative, amount, uiAmount, usdPrice, usdValue, priceChange24h }] }
+```
+
+A user without a linked wallet answers `walletAddress: ''` and an empty `tokens` list; an unknown username or id is a `404`.
+
+## Data sources
+
+| Data                              | Source                                                                                                           | Cached     |
+| --------------------------------- | ---------------------------------------------------------------------------------------------------------------- | ---------- |
+| Trending tokens, search, metadata | [Jupiter Token API v2](https://jup.ag) (keyless tier, or the paid host when `JUPITER_API_KEY` is set)            | 1–5 min    |
+| Spot prices                       | Jupiter token metadata (`usdPrice`, `priceChange24h`)                                                            | 1–5 min    |
+| Price candles                     | [GeckoTerminal](https://www.geckoterminal.com) OHLCV for the token's deepest pool, proxied and cached by the API | 30 s–5 min |
+| Trades                            | DIM's own swap ledger, confirmed swaps only                                                                      | live       |
+| Holdings                          | On-chain reads of the user's wallets, priced through Jupiter                                                     | 60 s       |
+
+Charts and metadata are served through the DIM API so clients never call Jupiter or GeckoTerminal directly and rate limits are shared.
+
+## SDK
+
+```typescript
+const trending = await sdk.trade.getTrending({ interval: '24h', limit: 10 });
+const stocks = await sdk.trade.getStocks();
+const [bonk] = await sdk.trade.searchTokens('BONK');
+const token = await sdk.trade.getToken(bonk.assetId); // or a bare mint, or 'solana:native'
+const chart = await sdk.trade.getChart(bonk.mint, '1D');
+const trades = await sdk.trade.getTokenTrades(bonk.mint, 50);
+const recent = await sdk.trade.getRecentTrades(20);
+const aliceTrades = await sdk.trade.getUserTrades('alice', 20);
+
+const holdings = await sdk.trade.getUserHoldings('alice'); // by username
+const same = await sdk.trade.getUserHoldingsById(holdings.userId, {
+  minUsd: 1,
+  limit: 50,
+});
+const mine = await sdk.trade.getMyHoldings();
+
+// Holdings revalued live: one watch list on the socket, a REST re-read while it is down
+const close = await sdk.trade.openHoldingsSession('me', { live: true });
+const live = sdk.trade.observeHoldings('me');
+live.subscribe(() => {
+  const { tokens, totalUsd, connected } = live.getSnapshot(); // each token plus livePrice, liveValue, priceStatus
+});
+close();
+```
+
+To buy or sell one of these tokens, pass its mint to the swapper: `sdk.swap.getToken(mint)` returns metadata and the caller's balance for any tradable mint, and `sdk.swap.swap({ inputMint, outputMint, amount, slippageBps })` fills it ([Swap](/guides/swap)).
+
+## MCP
+
+| Tool                      | Purpose                                                                                                            |
+| ------------------------- | ------------------------------------------------------------------------------------------------------------------ |
+| `dim_get_trending_tokens` | `{ interval?, limit? }`: trending Solana tokens from Jupiter with price, 24h change, volume, liquidity, market cap |
+| `dim_get_stocks`          | Tokenized stocks, largest first                                                                                    |
+| `dim_get_token`           | A token by symbol, name, mint or asset id                                                                          |
+| `dim_get_token_trades`    | `{ mint, limit? }`: the latest trades DIM users made on a token                                                    |
+| `dim_get_user_trades`     | `{ username, limit? }`: a user's recent trades across all tokens                                                   |
+| `dim_get_user_holdings`   | `{ user, minUsd?, limit? }`: a user's holdings across their wallets, with each row's price-feed `marketId`         |
+
+The swap tools `dim_get_swap_quote` and `dim_swap_tokens` accept a mint address in `from` / `to` as well as the SOL, USDC and DIM symbols, so an agent goes from "what's trending" to a fill in two calls. See the [MCP tools reference](/mcp/tools).
+
+## REST
+
+| Method | Path                                                     | Auth     | Purpose                                                  |
+| ------ | -------------------------------------------------------- | -------- | -------------------------------------------------------- |
+| GET    | `/trade/tokens/trending?interval=5m\|1h\|6h\|24h&limit=` | Optional | Trending tokens (default `1h`)                           |
+| GET    | `/trade/tokens/stocks`                                   | Optional | Tokenized stocks, largest first                          |
+| GET    | `/trade/tokens/search?q=`                                | Optional | Search by symbol, name or mint; native coins first       |
+| GET    | `/trade/tokens/:id`                                      | Optional | Metadata and price by asset id or bare mint              |
+| GET    | `/trade/tokens/:id/chart?timeframe=1H\|1D\|1W\|1M\|1Y`   | Optional | USD candles (default `1D`)                               |
+| GET    | `/trade/tokens/:id/trades?limit=`                        | Optional | Confirmed trades by DIM users on the token, newest first |
+| GET    | `/trade/trades/recent?limit=`                            | Optional | Latest confirmed trades across all tokens                |
+| GET    | `/trade/users/:username/trades?limit=`                   | Optional | A user's confirmed trades across all tokens              |
+| GET    | `/trade/users/:username/holdings?minUsd=&limit=`         | Optional | A user's holdings by username                            |
+| GET    | `/trade/holdings/:userId?minUsd=&limit=`                 | Optional | A user's holdings by id                                  |
+| GET    | `/trade/holdings/me?minUsd=&limit=`                      | Required | The signed-in user's holdings                            |
+| GET    | `/swap/tokens/:mint`                                     | Required | Metadata and the caller's balance for any tradable mint  |
+
+## Errors
+
+| Message                                     | Meaning                                                          |
+| ------------------------------------------- | ---------------------------------------------------------------- |
+| `… is not tradable on Jupiter`              | Jupiter has no route for this mint (unlisted, or a devnet token) |
+| `Token swaps are only available on mainnet` | The API is configured for devnet or testnet                      |
+| `Unsupported token mint`                    | The mint is not a valid, tradable token                          |
+| Empty `candles`                             | No indexed liquidity pool yet for this token                     |
+| `404`                                       | Unknown username or user id on a holdings or trades route        |

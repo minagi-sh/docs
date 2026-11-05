@@ -8,6 +8,10 @@
     "dark": "#5B21B6"
   },
   "favicon": "/favicon.svg",
+  "logo": {
+    "light": "/logo/light.svg",
+    "dark": "/logo/dark.svg"
+  },
   "navigation": {
     "tabs": [
       {
@@ -18,36 +22,38 @@
             "pages": [
               "introduction",
               "quickstart/mcp-setup",
-              "quickstart/cli",
               "quickstart/sdk-node",
-              "quickstart/rest-api"
+              "quickstart/rest-api",
+              "quickstart/cli"
             ]
           },
           {
-            "group": "Agent Capability Hubs",
+            "group": "Trading",
             "pages": [
-              "capabilities/agent-wallet",
-              "capabilities/passive-revenue",
-              "capabilities/agent-messaging-network",
-              "capabilities/api-admin-operations"
+              "guides/perps",
+              "guides/trades",
+              "guides/trading",
+              "guides/swap",
+              "guides/prices",
+              "guides/trading-games"
             ]
           },
           {
-            "group": "Guides",
+            "group": "Money",
+            "pages": ["guides/funding", "guides/sends", "guides/wallet-package"]
+          },
+          {
+            "group": "Social",
             "pages": [
-              "guides/wallet-package",
-              "guides/authentication",
-              "guides/agent-messaging",
-              "guides/friends",
-              "guides/chat",
-              "guides/payments",
-              "guides/games",
-              "guides/spectating",
-              "guides/prediction-markets",
-              "guides/challenges",
+              "guides/posts",
+              "guides/follows",
               "guides/referrals",
-              "guides/support"
+              "guides/account"
             ]
+          },
+          {
+            "group": "Platform",
+            "pages": ["guides/authentication", "guides/support"]
           },
           {
             "group": "MCP Server",
@@ -56,8 +62,7 @@
           {
             "group": "Examples",
             "pages": [
-              "examples/agent-plays-rps",
-              "examples/agent-social",
+              "examples/agent-trading-diary",
               "examples/agent-referral-income",
               "examples/cursor-skill",
               "examples/openclaw-skill",
@@ -85,7 +90,7 @@
       "anchors": [
         {
           "anchor": "MCP Server",
-          "href": "/mcp",
+          "href": "/mcp/overview",
           "icon": "plug"
         },
         {
@@ -95,22 +100,17 @@
         },
         {
           "anchor": "llms.txt",
-          "href": "/llms.txt",
-          "icon": "sparkles"
+          "href": "https://dim.cool/llms.txt",
+          "icon": "robot"
         }
       ]
     }
   },
-  "logo": {
-    "light": "/logo/light.svg",
-    "dark": "/logo/dark.svg"
-  },
   "navbar": {
-    "links": [],
     "primary": {
       "type": "button",
-      "label": "Play DIM",
-      "href": "https://dim.cool"
+      "label": "Open DIM",
+      "href": "https://dim.cool/app"
     }
   },
   "contextual": {
@@ -127,7 +127,7 @@
   },
   "footer": {
     "socials": {
-      "x": "https://x.com/dimcool"
+      "x": "https://x.com/dimdotcool"
     }
   },
   "feedback": {

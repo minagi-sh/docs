@@ -1,16 +1,19 @@
 ---
 title: Referral Rewards Policy
-description: "Policy on referral reward creation, claiming, and expiration."
+description: 'Policy on referral reward creation, claiming, and expiration.'
 ---
 
 ## How Rewards Are Created
 
-Referral rewards are created automatically when a referred user's game generates platform fees. Each reward is created with a **PENDING** status and linked to the specific game and fee collection that triggered it.
+Referral rewards are created automatically when a referred user pays a **trading fee** to DIM: the fee on a **token swap**, DIM's **builder fee on a perps fill**, or the fee on a **withdrawal** to an outside address. Each reward is created with a **PENDING** status and linked to the fee collection that triggered it (`source`: `SWAP`, `PERP` or `TRANSFER`). Every fee is valued in USDC when it is collected, so rewards are always paid in USDC whatever token was swapped or withdrawn.
 
-Reward amounts are calculated based on the [referral commission rates](/guides/referrals#commission-rates):
-- **Level 1**: 30% of the referred user's game fee
-- **Level 2**: 3% of the game fee
-- **Level 3**: 2% of the game fee
+Reward amounts are a share of **DIM's fee**, never of the trade itself, at the [referral rates](/guides/referrals#the-rules):
+
+- **Level 1**: 30% of the fee the referred user paid
+- **Level 2**: 3% of that fee
+- **Level 3**: 2% of that fee
+
+A share that rounds to less than one minor unit of USDC creates no reward. Fees DIM does not keep create no rewards: the venue's own taker fee, the route fees of a move into or out of perps, and the network fees DIM pays for sends.
 
 ## Claiming Rewards
 
@@ -20,11 +23,11 @@ Pending rewards can be claimed at any time:
 - **SDK**: `await sdk.referrals.claimRewards()`
 - **REST**: `POST /referrals/me/claim`
 
-Claiming transfers all pending USDC rewards from the platform escrow wallet directly to your Solana wallet in a single transaction.
+Claiming marks every pending reward **CLAIMED** and transfers their total in USDC from the platform's escrow wallet to your Solana wallet in a single transaction, through DIM's transaction queue. A claim that cannot be confirmed on chain within five minutes is reverted: its rewards return to **PENDING** and can be claimed again. One claim per ten seconds.
 
 ## Unclaimed Reward Expiration
 
-Dim reserves the right to cancel (reclaim) unclaimed rewards after **2 years** from the reward creation date.
+DIM reserves the right to cancel (reclaim) unclaimed rewards after **2 years** from the reward creation date. A cancelled reward is marked **CANCELLED**.
 
 This policy exists to prevent indefinite accumulation of unclaimed funds in the escrow wallet. We encourage users to claim rewards periodically.
 
@@ -32,4 +35,6 @@ This policy exists to prevent indefinite accumulation of unclaimed funds in the 
 
 ## Forward-Only Accrual
 
-Referral rewards accrue from the moment a referral code is applied. If a user applies a referral code after playing games, those earlier games do not generate retroactive referral rewards. Only future game fees will produce rewards for the referrer.
+Referral rewards accrue from the moment a referral code is applied. If a user applies a referral code after trading, the fees paid before that do not generate retroactive referral rewards. Only fees paid afterwards produce rewards for the referrer.
+
+A referral code can be applied once per account, and a referral is permanent.

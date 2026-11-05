@@ -1,0 +1,195 @@
+---
+title: 'Swap Tokens'
+description: 'Swap between SOL, USDC and any tradable Solana token inside DIM, with quotes from Jupiter and network fees covered by the platform; remove dust in one sweep.'
+---
+
+## Overview
+
+DIM includes a swapper for the tokens you use on the platform: **SOL** and **USDC** as quick picks, plus any token Jupiter can route by mint address. Quotes and routing come from the [Jupiter](https://jup.ag) aggregator; DIM builds the transaction for your wallet, you sign it, and DIM submits and confirms it. Every confirmed swap becomes a [trade](/guides/trades) and moves your position in the token.
+
+- **You sign, you keep custody.** The transaction is built for your own wallet address. Nothing moves without your signature.
+- **Network fees are covered.** On the standard path the DIM fee payer pays the Solana network fee and funds the token account you receive into, so a wallet holding only USDC can swap into SOL or any other token. Wallets that can only sign-and-send pay their own network fee.
+- **Slippage protection.** Every swap carries a minimum output. If the market moves past your slippage tolerance (0.5% by default, at most 3%), the transaction fails instead of filling badly. Quotes with more than 10% price impact are refused.
+
+Amounts are **integer base units**: lamports for SOL (9 decimals), minor units for USDC (6 decimals), and the mint's own decimals for any other token. `getTokens()` returns each token's decimals and your balance.
+
+<Warning>
+  Swaps are **Solana mainnet only**. Jupiter only routes mainnet tokens, so a
+  deployment on devnet or testnet cannot even quote: `getTokens()` returns
+  `enabled: false` with `disabledReason: 'network'`, and quotes are refused with
+  `Token swaps are only available on Solana mainnet`. Quoting on mainnet does
+  not require funds, so a local API pointed at a mainnet RPC can test quotes
+  safely.
+</Warning>
+
+## Supported Pairs
+
+| From           | To                   |
+| -------------- | -------------------- |
+| SOL            | USDC, any other mint |
+| USDC           | SOL, any other mint  |
+| Any other mint | SOL, USDC            |
+
+## List Tokens and Balances
+
+```typescript
+const {
+  tokens,
+  enabled,
+  disabledReason,
+  platformFeeBps,
+  dustFeeBps,
+  dustThresholdsUsd,
+  maxSlippageBps,
+  defaultSlippageBps,
+} = await sdk.swap.getTokens();
+// tokens: [{ mint, symbol: 'SOL' | 'USDC', decimals, isNative, balance, icon }]
+// enabled: false with disabledReason 'flag' (feature flag off) or 'network' (not mainnet)
+
+// Any other tradable mint, with your balance
+const bonk = await sdk.swap.getToken(
+  'DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263',
+);
+```
+
+`GET /swap/tokens/:mint` also accepts an asset id: `solana:native` is mapped to the Wrapped SOL mint Jupiter swaps.
+
+## Get a Quote
+
+```typescript
+const quote = await sdk.swap.getQuote({
+  inputMint: usdc.mint,
+  outputMint: bonk.mint,
+  amount: 5_000_000, // 5 USDC in minor units
+  slippageBps: 50, // 0.5%
+});
+
+console.log(quote.outputAmount); // expected BONK (base units)
+console.log(quote.minOutputAmount); // guaranteed minimum after slippage
+console.log(quote.priceImpactPct); // e.g. "0.0012" = 0.12%
+console.log(quote.routeLabels); // e.g. ["Orca"]
+```
+
+Quotes are indicative. `prepare()` and `swap()` quote again at execution time.
+
+## Swap
+
+One call prepares, signs with your configured signer and submits:
+
+```typescript
+const result = await sdk.swap.swap({
+  inputMint: usdc.mint,
+  outputMint: bonk.mint,
+  amount: 5_000_000,
+  slippageBps: 50,
+});
+
+console.log(result.signature); // Solana transaction signature
+console.log(result.outputAmount); // BONK actually received (base units)
+console.log(result.trade); // the recorded trade event
+```
+
+Or step by step, to show the final numbers before signing:
+
+```typescript
+const prepared = await sdk.swap.prepare({
+  inputMint: usdc.mint,
+  outputMint: bonk.mint,
+  amount: 5_000_000,
+});
+// prepared.transaction is the base64 transaction to sign;
+// prepared.feePayer is 'platform' or 'user'.
+
+const result = await sdk.swap.submitPrepared(prepared);
+```
+
+<Note>
+  `swap()` and `submitPrepared()` need a signer (`sdk.wallet.setSigner(...)`).
+  In React, `useSwap()` from `@dimcool/react-sdk` wraps this flow with loading,
+  step and error state, and reloads balances after each swap.
+</Note>
+
+## Swap History
+
+```typescript
+const swaps = await sdk.swap.getHistory(20);
+// [{ id, status: 'CONFIRMED' | 'FAILED' | ..., inputAmount, actualOutputAmount, signature, createdAt }]
+```
+
+Confirmed swaps also appear in your [wallet activity](/guides/payments) with the `SWAP` kind, and as trade events under `/trades/*`.
+
+## Remove dust
+
+A sweep turns the small balances of a wallet into USDC in one go. **Dust** is any priced token (never SOL or USDC) worth less than the threshold: **$2 by default, or $1** (`dustThresholdsUsd` in `getTokens()`). Every dust token is its own swap, so a sweep is one transaction and one signature per token; a token Jupiter cannot route (or that would move the price too much) is listed with the `reason` and simply stays. DIM keeps **5% of the USDC produced** (`dustFeeBps`, 500 by default, `SWAP_DUST_FEE_BPS` per deployment) instead of the normal swap fee; it is collected and shared with referrers like any swap fee.
+
+```typescript
+const preview = await sdk.swap.previewDust({ thresholdUsd: 2 });
+// { thresholdUsd, feeBps, items: [{ mint, symbol, usdValue, quote?: { outputAmount, platformFeeAmount }, reason? }],
+//   totalUsdValue, totalOutputMinor, totalFeeMinor, swappable }
+
+const sweep = await sdk.swap.removeDust({
+  thresholdUsd: 2,
+  mints: preview.items.filter((i) => i.quote).map((i) => i.mint),
+  onProgress: (step) => console.log(step.symbol, step.status), // signing | done | failed | skipped
+});
+const status = await sdk.swap.getDustSweep(sweep.sweepId);
+// { sweepId, thresholdUsd, feeBps, swaps, confirmedOutputMinor, confirmedFeeMinor, confirmed, failed, pending }
+```
+
+Agents have `dim_preview_dust` and `dim_remove_dust`.
+
+## Fees
+
+| Fee          | Amount                                                                                                                                                                                                                                                                                    |
+| ------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Network fee  | Paid by DIM on the standard path (`feePayer: 'platform'`)                                                                                                                                                                                                                                 |
+| Platform fee | 0.5% by default (`platformFeeBps` in `getTokens()`, `SWAP_PLATFORM_FEE_BPS` per deployment). Charged on top of Jupiter's route price and collected into DIM's treasury wallet, in USDC when one side of the swap is USDC, else in SOL when one side is SOL, otherwise in the output token |
+| Dust fee     | 5% of the USDC a sweep produces (`dustFeeBps`), in place of the platform fee                                                                                                                                                                                                              |
+| DEX fees     | Included in the quoted price by the liquidity pools on the route                                                                                                                                                                                                                          |
+
+### Swap fees and referral rewards
+
+Swap platform fees enter DIM's fee ledger with the `SWAP` source. Each fee is valued in USDC at quote time (exact when the fee is collected in USDC, otherwise from Jupiter's USD value of the swap), and the referrers of the swapping user earn the standard [referral commissions](/policies/referral-rewards) on it: 30% (level 1), 3% (level 2) and 2% (level 3). Referrers see swap-sourced rewards in their referral activity with the `SWAP` source.
+
+## Agents (MCP)
+
+Agents using `@dimcool/mcp` or `@dimcool/dim-agent-core` get the same swapper as tools: `dim_get_swap_tokens`, `dim_get_swap_quote`, `dim_swap_tokens`, `dim_confirm_swap` (external wallets), `dim_get_swap_history`, and for dust `dim_preview_dust` and `dim_remove_dust`. Tool amounts are in whole tokens, `from` / `to` accept a symbol or a mint address, and USDC sold in a swap counts against the agent's daily spend limit. See the [MCP tools reference](/mcp/tools#swap).
+
+## React
+
+`useSwap()` from `@dimcool/react-sdk` wraps the flow with tokens, balances, quote, step and error state, and reloads balances after each swap.
+
+```tsx
+const { tokens, getQuote, quote, swap, step, error } = useSwap();
+```
+
+## REST Endpoints
+
+All endpoints require a bearer token ([authentication](/guides/authentication)).
+
+| Method | Path                                                  | Purpose                                                                                     |
+| ------ | ----------------------------------------------------- | ------------------------------------------------------------------------------------------- |
+| GET    | `/swap/tokens`                                        | Supported tokens, balances, fee and slippage settings, dust thresholds                      |
+| GET    | `/swap/tokens/:mint`                                  | Metadata and your balance for any tradable mint or asset id                                 |
+| GET    | `/swap/quote?inputMint&outputMint&amount&slippageBps` | Indicative quote                                                                            |
+| POST   | `/swap/prepare`                                       | Build the transaction (`{ inputMint, outputMint, amount, slippageBps?, supportsPresign? }`) |
+| POST   | `/swap/submit`                                        | Submit a signed transaction (`{ swapId, signedTransaction }`)                               |
+| POST   | `/swap/confirm-signature`                             | Confirm a client-sent transaction (`{ swapId, signature }`)                                 |
+| GET    | `/swap/history?limit`                                 | Your recent swaps                                                                           |
+| POST   | `/swap/dust/preview`                                  | Dust under the threshold with a USDC quote each (`{ thresholdUsd? }`)                       |
+| POST   | `/swap/dust/prepare`                                  | One swap to sign per chosen dust token (`{ thresholdUsd?, mints, supportsPresign? }`)       |
+| GET    | `/swap/dust/:sweepId`                                 | A sweep's swaps and totals                                                                  |
+
+## Errors
+
+| Message                                                | Meaning                                               |
+| ------------------------------------------------------ | ----------------------------------------------------- |
+| `Unsupported token mint`                               | The mint is not one Jupiter can trade                 |
+| `Insufficient … balance for this swap`                 | The wallet holds less than `amount`                   |
+| `No swap route is available right now`                 | Jupiter could not route the pair at that size         |
+| `Price impact … is above the 10% limit`                | Reduce the amount                                     |
+| `This swap route does not fit in a single transaction` | Reduce the amount; complex routes cannot be co-signed |
+| `Swaps are currently disabled`                         | The `enable-swap` feature flag is off                 |
+| `Token swaps are only available on Solana mainnet`     | The API runs against devnet or testnet                |
+| `… is not tradable on Jupiter`                         | Jupiter does not route this mint                      |
+| `thresholdUsd must be one of 1, 2`                     | A dust threshold outside the offered ones             |

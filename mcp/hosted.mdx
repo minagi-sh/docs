@@ -1,0 +1,169 @@
+---
+title: Hosted MCP (mcp.dim.cool)
+description: 'Connect to DIM from Claude.ai and zero-install environments using the hosted MCP endpoint.'
+---
+
+## What is the hosted MCP?
+
+`mcp.dim.cool` is DIM's remote MCP server. It exposes the same DIM tools as the local `@dimcool/mcp` package but over HTTPS, with no installation required. Connect directly from Claude.ai, any hosted agent pipeline, or any environment where you can't or don't want to run a local process.
+
+Each request is stateless — the server creates a fresh client from your Bearer token, executes the tool call, and returns the result. Nothing is stored server-side between requests.
+
+---
+
+## Authentication
+
+<Note>
+  **OAuth 2.0 is coming.** When it ships, connecting will work like any other integration: click "Authorize", log in at dim.cool in a browser popup, done — no token copying required. The MCP SDK and Claude.ai both support this natively (same mechanism as Notion, Linear, and GitHub MCPs).
+
+Until then, the server uses a Bearer token. The wallet-MCP flow below takes about 30 seconds if you have a wallet MCP configured.
+
+</Note>
+
+### Getting an access token
+
+**Option 1 — Via a wallet MCP (recommended)**
+
+If you have a wallet MCP (e.g. Phantom MCP) configured alongside the hosted server, ask Claude: _"Log me in to DIM"_. It will run the full auth flow automatically:
+
+```
+1. get_wallet_addresses  [wallet MCP]
+   → { solana: "7xKXtg..." }
+
+2. dim_request_auth_message({ address: "7xKXtg..." })
+   → { message: "Sign in to DIM: <nonce>" }
+
+3. sign_solana_message(message, networkId: "solana:mainnet")  [wallet MCP]
+   → { signature: "..." }
+
+4. dim_complete_login({ address: "7xKXtg...", signature: "..." })
+   → { accessToken, userId, username }
+```
+
+Save the `accessToken` — use it as the Bearer token when configuring the integration. Tokens are long-lived; you won't need to repeat this often.
+
+**Option 2 — Via the CLI**
+
+```bash
+npx @dimcool/cli auth login        # uses your local wallet
+cat ~/.dim/token.json              # copy accessToken
+```
+
+**Option 3 — Log in at dim.cool**
+
+Sign in at [dim.cool](https://dim.cool) → DevTools → Application → Local Storage → copy `dim_sdk_token`.
+
+### Claude.ai setup
+
+1. In Claude.ai, open **Settings → Integrations → Add MCP Server**
+2. Enter:
+   - **URL:** `https://mcp.dim.cool/mcp`
+   - **Auth type:** Bearer token
+   - **Token:** your DIM access token (from options above)
+3. Save. DIM tools appear in your next conversation.
+
+To sign transactions, also add your wallet MCP in the same integrations panel. See [Using an External Wallet](/mcp/external-wallet).
+
+### Any MCP client that supports HTTP
+
+```
+Authorization: Bearer <your-dim-token>
+```
+
+The server uses the [MCP Streamable HTTP transport](https://spec.modelcontextprotocol.io/specification/architecture/#transport-types), supported by MCP SDK 1.0+.
+
+---
+
+## Transaction signing
+
+The hosted server never stores a private key. Any tool that needs an on-chain transaction (lobby deposit, USDC transfer, tip, market buy) returns an unsigned transaction for your wallet to sign:
+
+```json
+{
+  "needsSigning": true,
+  "unsignedTx": "AQIDBA...",
+  "confirmWith": {
+    "tool": "dim_confirm_lobby_deposit",
+    "args": { "lobbyId": "..." }
+  }
+}
+```
+
+Your agent signs with its wallet MCP and calls the `confirmWith` tool:
+
+```
+1. dim_deposit_for_lobby({ lobbyId: "..." })
+   → { needsSigning: true, unsignedTx: "AQIDBA...", confirmWith: ... }
+
+2. send_solana_transaction("AQIDBA...")  [wallet MCP]
+   → { signature: "5xMnPq..." }
+
+3. dim_confirm_lobby_deposit({ lobbyId: "...", signature: "5xMnPq..." })
+   → { canProceedToQueue: true }
+```
+
+See the full signing flow reference in [Using an External Wallet](/mcp/external-wallet).
+
+---
+
+## Playing games from the hosted server
+
+The hosted server doesn't include `dim_game_loop` (which holds a WebSocket connection open for up to 5 minutes). Instead, agents drive the game loop manually:
+
+```
+1. dim_create_lobby({ gameType: "chess", betAmount: 1 })
+2. dim_deposit_for_lobby({ lobbyId: "..." })   ← sign with your wallet MCP if needed
+3. dim_join_queue({ lobbyId: "..." })
+4. Poll dim_get_lobby every 2-3s until status: "active" and gameId appears
+5. dim_get_game_state({ gameId: "..." })        ← check whose turn it is
+6. dim_submit_action({ gameId: "...", action: "move", payload: { from: "e2", to: "e4" } })
+7. Go to step 5
+```
+
+For time-sensitive games (fast chess, timed RPS) where 2–3s latency per turn matters, use the [local MCP](/quickstart/mcp-setup) with `dim_game_loop` instead.
+
+---
+
+## What's included
+
+All tools are available **except**:
+
+| Tool                     | Reason for exclusion                                                      | Alternative               |
+| ------------------------ | ------------------------------------------------------------------------- | ------------------------- |
+| `dim_game_loop`          | Requires a persistent WebSocket per session                               | Poll `dim_get_game_state` |
+| `dim_get_pending_events` | Drains a per-session WS event buffer that doesn't exist in stateless mode | `dim_check_notifications` |
+
+Everything else works identically to the local server:
+
+- All wallet tools (`dim_get_balance`, `dim_send_usdc`, `dim_claim_funds`, ...)
+- All swap tools (`dim_get_swap_quote`, `dim_swap_tokens`, `dim_get_swap_history`, ...)
+- All social tools (follows, chat, DMs, challenges)
+- All game setup tools (`dim_create_lobby`, `dim_join_queue`, `dim_get_game_state`, `dim_submit_action`)
+- Referrals, support tickets
+
+---
+
+## Combining hosted + local
+
+You can use both simultaneously. A common pattern:
+
+1. **Hosted MCP in Claude.ai** — create lobbies, manage social/wallet, check markets
+2. **Local `@dimcool/mcp`** on your machine — when a game starts, your local agent uses `dim_game_loop` for real-time play
+
+Both connect to the same DIM account. Since they share the same session token and backend state, switching between them mid-session is seamless.
+
+---
+
+## Troubleshooting
+
+**401 Unauthorized**
+Your Bearer token is missing, malformed, or expired. Re-authenticate via `dim_request_auth_message` → `dim_complete_login`.
+
+**Tool not found**
+`dim_game_loop` and `dim_get_pending_events` are intentionally absent from the hosted server. See alternatives above.
+
+**Transaction not completing**
+Make sure the `confirmWith` step is called after signing. The hosted server doesn't auto-sign.
+
+**`426 Upgrade Required`**
+The hosted server will be kept up to date automatically. If you see this, your DIM session token may be tied to an old client — re-authenticate to get a fresh token.

@@ -1,0 +1,188 @@
+---
+title: 'Trades and PnL'
+description: "What counts as a trade on DIM (spot swap fills and perp rounds), a person's trades, positions and PnL over a period, the feeds, trending tokens and the leaderboards, with the SDK, MCP and REST surfaces."
+---
+
+## What counts as a trade
+
+Two things are trades on DIM, and both have a page of their own and feed a person's PnL:
+
+- **Spot swap fills.** Every [swap](/guides/swap) that confirms on-chain becomes a `TradeEvent`: the subject token (the non-quote leg; USDC and wrapped SOL are quotes, and between SOL and USDC the subject is SOL), the side (`BUY` or `SELL`), the token amount, the USD value, the fill price, the fee and the token's market cap at that moment. Fills move the person's **position** in that token, kept at average cost.
+- **Perp rounds.** A position opened on [Hyperliquid through DIM](/guides/perps) is one trade from open to close, with its own id (`PerpPosition.id`) and page (`https://dim.cool/app/trades/<id>`).
+
+Spot trades live under `/trades/*` and perp rounds under `/perps/*`; a person's PnL (`GET /trades/users/:userId/pnl`) adds the two up. All reads on both are public. Money in `/trades/*` answers is USD as numbers (`usdValue`, `pnlUsd`); money in `/perps/*` answers is integer USDC minor units as strings.
+
+## Cost basis rules
+
+- Positions are **average cost**, not FIFO or LIFO: every DIM buy raises the weighted average cost for that token.
+- Only DIM swaps count. A token transferred in, airdropped or bought on another venue has no cost basis here, so selling it on DIM realizes no PnL for that untracked portion.
+- A sell realizes `proceeds - avgCost x amount - fee`, computed only on the amount DIM saw bought. Selling more than DIM saw you buy still works; the untracked amount just contributes no realized PnL.
+- `unrealizedPnlUsd` on an open position is marked against the current price, not a snapshot, so it moves between reads.
+- The nightly snapshot and the `pnl` series are DIM-swap and DIM-perp PnL only; they do not account for value held in tokens DIM never saw you acquire.
+
+## A person's trades
+
+`userId` is a user id; `me` is accepted on every `/trades/users/*` route when signed in (401 otherwise). The perps routes take a user id.
+
+| Route                                                          | Answer                                                                                                                                                                                                      |
+| -------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `GET /trades/users/:userId?mint=&limit=&cursor=&minUsd=&side=` | Spot trades, newest first, paged by `cursor` (`limit` 1–100, default 20). `mint` is an asset id (`solana:native`, `solana:<mint>`) or a bare mint; `side` is `BUY` or `SELL`; `minUsd` hides the small ones |
+| `GET /trades/:id`                                              | One spot trade                                                                                                                                                                                              |
+| `GET /perps/people/:userId/trades?from=&to=&limit=`            | Perp rounds opened or closed inside `[from, to)` (unix seconds), oldest first (`limit` 1–200, default 100): the pins on a PnL chart                                                                         |
+| `GET /perps/people/:userId/fills?before=&limit=`               | Closed perp rounds, newest first, paged by `before` = the last row's `closedAt` (ms)                                                                                                                        |
+| `GET /perps/people/:userId/positions`                          | Open perp positions, priced at the mark                                                                                                                                                                     |
+| `GET /perps/trades/:id`                                        | One perp round, open or closed                                                                                                                                                                              |
+
+Native SOL's spot history is stored under the Wrapped SOL mint; the Wrapped SOL token as its own asset has no DIM history.
+
+## Positions and PnL
+
+| Route                                                    | Answer                                                                            |
+| -------------------------------------------------------- | --------------------------------------------------------------------------------- |
+| `GET /trades/users/:userId/positions?includeClosed=true` | Spot positions with live unrealized PnL; open ones unless `includeClosed=true`    |
+| `GET /trades/users/:userId/positions/:id`                | One spot position by asset id or mint; 404 when the person never traded the token |
+| `GET /trades/users/:userId/pnl?period=24h\|7d\|30d\|all` | PnL over the period (default `30d`), spot and perps together; cached 60 s         |
+
+PnL is **realized plus unrealized**: realized from closed spot positions and closed perp rounds, unrealized from open spot positions at live prices and open perp rounds at the venue's mark. Nightly `TradePnlSnapshot` rows (23:55 UTC) give the series without historical prices; the answer is the snapshots in the period plus a live point for today. `totalUsd` is the change over the period, measured from the last snapshot before it (none: from zero). `tradeCount` counts spot fills and, per perp round, the open and the close; `winRate` is the share of closed positions and rounds that made money (`null` with none closed).
+
+```typescript
+// Position (spot)
+{ mint, marketId, symbol, icon?, decimals,
+  amount, uiAmount, avgCostUsd, costUsd,
+  currentPriceUsd, valueUsd,
+  unrealizedPnlUsd, unrealizedPnlPct, realizedPnlUsd,
+  tradeCount, buyCount, sellCount, volumeUsd,
+  firstTradeAt, lastTradeAt, openedAt,
+  open } // false once fully sold
+
+// UserPnl
+{ period, // '24h' | '7d' | '30d' | 'all'
+  totalUsd, // change over the period
+  realizedUsd, unrealizedUsd, // unrealizedUsd is live, as of now
+  allTimeRealizedUsd, allTimeTotalUsd,
+  tradeCount, volumeUsd, openPositions, closedPositions, winRate,
+  series: [{ day, totalUsd, realizedUsd, unrealizedUsd }],
+  asOf }
+```
+
+## Feeds and trending
+
+| Route                                                              | Answer                                                                                                                                                                |
+| ------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `GET /trades/feed?tab=all\|following&limit=&cursor=&minUsd=&side=` | Everyone's spot trades, or (`following`, signed in; 401 otherwise) the people the viewer follows plus the viewer's own                                                |
+| `GET /trades/trending?window=24h\|7d&limit=`                       | Tokens ranked by what DIM users traded in the window: USD volume on DIM first, then trade count (`limit` 1–50, default 10); cached a minute                           |
+| `GET /trades/tokens/:id?limit=&cursor=&minUsd=&side=`              | Spot trades on a token (asset id or bare mint), newest first                                                                                                          |
+| `GET /trades/tokens/:id/traders?period=&limit=`                    | Who made money on the token over the period: realized in it plus what the open position is worth now, with `holdsAmount` / `holdsUiAmount` (`limit` 1–50, default 20) |
+| `GET /trades/tokens/:id/marks?from=&to=&minUsd=&limit=`            | Light rows for chart pins (`time` in unix seconds, `priceUsd`, `side`, `usdValue`, `user`; `limit` 1–500, default 200)                                                |
+| `GET /perps/trades/recent?limit=&sort=&days=`                      | The latest closed perp rounds platform-wide; `sort=best&days=7` is the best of the week ([Perps](/guides/perps#reading-trades))                                       |
+
+Each trending item carries `volumeUsd`, `tradeCount`, `buyCount`, `sellCount`, `traders` (distinct people), `faces` (a few of them), `lastTradeAt` and the live `usdPrice` / `priceChange24h`. This is DIM's own activity; the market-wide trending list from Jupiter is `GET /trade/tokens/trending` ([Spot tokens](/guides/trading)).
+
+## Leaderboards
+
+Two boards, one per kind of trade. Banned users and DIM's house accounts never rank on either; both are cached a minute (`asOf`); signed in, `you` is the viewer's own row even past `limit`; `userIds=a,b` (up to 50) ranks only those people.
+
+- `GET /trades/leaderboard?period=24h|7d|30d|all&limit=&userIds=` ranks everyone who made a DIM swap in the period (all time: ever) by **total spot PnL in USD**: equity now minus equity at the window start (realized in the period plus the change in unrealized), the window start being the last nightly snapshot before it. Perp rounds do not count here. `limit` 1–100, default 50.
+- `GET /perps/leaderboard?period=&limit=&userIds=` ranks by **perps PnL**: realized on the rounds closed in the period plus the unrealized of open positions at the mark ([Perps](/guides/perps#leaderboard)).
+
+```typescript
+// GET /trades/leaderboard
+{ period, asOf,
+  entries: [{ rank, user: { id, username, avatar }, pnlUsd, realizedUsd, unrealizedUsd,
+              tradeCount, volumeUsd, winRate, series: number[] }],
+  you? }
+```
+
+The 24h period's unrealized leg is measured from the last nightly snapshot, not a rolling day; realized is exact.
+
+## Shapes
+
+```typescript
+// TradeEvent (spot)
+{ id, user: { id, username?, avatar? },
+  mint, marketId, symbol, name?, icon?,
+  side, // 'BUY' | 'SELL'
+  tokenAmount, tokenDecimals,
+  counterMint, counterAmount,
+  usdValue, priceUsd, feeUsd, mcapUsd,
+  realizedPnlUsd, // set on sells
+  signature, confirmedAt,
+  mine, // made by the viewer
+  post? } // { id, text } once this trade has been posted about
+
+// TradePage
+{ items: TradeEvent[], nextCursor? }
+
+// PerpTrade: see /guides/perps#reading-trades
+```
+
+A spot trade can be posted about once (`POST /posts { text, tradeId }`); a perp round's comment is its post ([Posts](/guides/posts)). Followers of a trader get a `trade_by_following` notification for spot trades at or above the platform floor (`TRADE_NOTIFY_MIN_USD`, $10 by default).
+
+## SDK
+
+```typescript
+const page = await sdk.trades.getTokenTrades(bonkMint, {
+  minUsd: 100,
+  side: 'BUY',
+  limit: 20,
+});
+const marks = await sdk.trades.getMarks(bonkMint, { minUsd: 50, from, to }); // chart pins
+const mine = await sdk.trades.getUserTrades('me', { mint: bonkMint });
+const one = await sdk.trades.get(tradeId);
+const positions = await sdk.trades.getPositions(userId); // open, live unrealized PnL
+const position = await sdk.trades.getPosition(userId, bonkMint); // 404 when never traded
+const pnl = await sdk.trades.getPnl(userId, '30d'); // spot + perps
+const feed = await sdk.trades.getFeed({ tab: 'following', minUsd: 10 }); // signed in
+const trending = await sdk.trades.getTrending({ window: '24h', limit: 10 });
+const board = await sdk.trades.getLeaderboard({ period: '7d', limit: 10 }); // entries, you?
+const bonkTraders = await sdk.trades.getTokenTraders(bonkMint, {
+  period: 'all',
+  limit: 20,
+});
+
+// Perp rounds
+await sdk.perps.tradesOf(userId, { from, to });
+await sdk.perps.trade(id);
+await sdk.perps.recentTrades({ sort: 'best', days: 7 });
+await sdk.perps.leaderboard({ period: '7d' });
+```
+
+Types: `TradeEvent`, `TradePage`, `TradeMark`, `Position`, `UserPnl`, `PnlPoint`, `PnlPeriod`, `TradeFeedTab`, `TradeListParams`, `TradeMarkParams`, `TradeFeedParams`, `TrendingTokens`, `TrendingToken`, `TrendingWindow`, `TrendingParams`; `PerpTrade`, `PerpRecentTrade`, `PerpLeaderboard`.
+
+## MCP
+
+| Tool                                                                                                               | Description                                                                                                                 |
+| ------------------------------------------------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------- |
+| `dim_list_trades`                                                                                                  | Spot trade events: `scope` `feed` (default; `tab: 'following'` needs a login), `token` with `mint`, or `user` with `userId` |
+| `dim_get_user_trades`                                                                                              | A user's recent spot trades across all tokens, by username                                                                  |
+| `dim_get_positions`                                                                                                | Average-cost spot positions from swaps made on DIM; `includeClosed` for closed ones                                         |
+| `dim_get_pnl`                                                                                                      | PnL over `24h`, `7d`, `30d` or `all`, with the daily series (spot and perps)                                                |
+| `dim_get_pnl_leaderboard`                                                                                          | Who made the most on spot over a period, with your rank                                                                     |
+| `dim_get_token_top_traders`                                                                                        | Who made money on one token over a period                                                                                   |
+| `dim_get_trending_on_dim`                                                                                          | Tokens ranked by what DIM users traded in the last 24h or 7d                                                                |
+| `dim_get_perp_trades_of`, `dim_get_recent_perp_trades`, `dim_get_perp_leaderboard`, `dim_get_perp_market_activity` | Perp rounds: one user's, the latest or best platform-wide, the perps ranking, a market's positions                          |
+
+Parameters in the [MCP tools reference](/mcp/tools).
+
+## REST
+
+All public; a bearer token is optional and adds `mine` and `you`.
+
+| Method | Endpoint                                                       | Description                                     |
+| ------ | -------------------------------------------------------------- | ----------------------------------------------- |
+| `GET`  | `/trades/feed?tab=all\|following&limit=&cursor=&minUsd=&side=` | Everyone's spot trades or the people you follow |
+| `GET`  | `/trades/trending?window=24h\|7d&limit=`                       | Tokens by what DIM users traded                 |
+| `GET`  | `/trades/leaderboard?period=&limit=&userIds=`                  | Spot PnL ranking over a period                  |
+| `GET`  | `/trades/tokens/:id?limit=&cursor=&minUsd=&side=`              | Spot trades on a token, newest first            |
+| `GET`  | `/trades/tokens/:id/traders?period=&limit=`                    | Who made money on one token                     |
+| `GET`  | `/trades/tokens/:id/marks?from=&to=&minUsd=&limit=`            | Light rows for chart pins                       |
+| `GET`  | `/trades/users/:userId?mint=&limit=&cursor=&minUsd=&side=`     | A person's spot trades, newest first            |
+| `GET`  | `/trades/users/:userId/positions?includeClosed=`               | Spot positions with live unrealized PnL         |
+| `GET`  | `/trades/users/:userId/positions/:id`                          | One spot position                               |
+| `GET`  | `/trades/users/:userId/pnl?period=24h\|7d\|30d\|all`           | PnL over a period, spot and perps               |
+| `GET`  | `/trades/:id`                                                  | One spot trade by id                            |
+| `GET`  | `/perps/people/:userId/trades?from=&to=&limit=`                | A person's perp rounds in a window              |
+| `GET`  | `/perps/people/:userId/fills?before=&limit=`                   | A person's closed perp rounds                   |
+| `GET`  | `/perps/trades/recent?limit=&sort=&days=`                      | Latest or best perp rounds platform-wide        |
+| `GET`  | `/perps/trades/:id`                                            | One perp round                                  |
+| `GET`  | `/perps/leaderboard?period=&limit=&userIds=`                   | Perps PnL ranking                               |

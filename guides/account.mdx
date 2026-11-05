@@ -1,0 +1,193 @@
+---
+title: 'Your account'
+description: 'Who you are on DIM: the user record, public profiles and search, username rules, bio and images, trading stats, the wallets linked to the account, and notifications, with the SDK, MCP and REST surfaces.'
+---
+
+## The user record
+
+There is no `GET /users/me`. Your own record comes back from the login response (`user` on `POST /auth/login-wallet` and `POST /auth/login`, see [Authentication](/guides/authentication)) and from `GET /users/:id` with your own id. The SDK keeps it for you: `sdk.auth.loginWithWallet()` returns it, and `sdk.users.getCachedUserById(id)` reads it from storage until it expires (`{ forceRefresh: true }` reloads it).
+
+```typescript
+{
+  id, email: string | null, username?, isAdmin,
+  avatar?, coverImage?, bio?,
+  type: 'human' | 'bot' | 'internal_bot',
+  deviceType?, createdAt, updatedAt,
+  onboardedAt?: string | null,   // when the web's first-visit tour was finished or skipped
+  chessElo, points,              // legacy counters
+}
+```
+
+Every write to the profile (`PATCH /users/me/...`, the image routes) answers the full record again.
+
+## Public profiles and search
+
+| Method | Endpoint                               | Auth     | Returns                                                                                                                                                                                                       |
+| ------ | -------------------------------------- | -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `GET`  | `/users/:id`                           | optional | A public profile: `id`, `username`, `avatar`, `coverImage`, `bio`, `type`, `connectedStatus`, `lastConnectedAt`, `createdAt`, `followersCount`, `followingCount`, and signed in `followedByYou`, `followsYou` |
+| `GET`  | `/users/username/:username`            | optional | The same, by username (case-insensitive)                                                                                                                                                                      |
+| `GET`  | `/users/search?username=&page=&limit=` | optional | Prefix search: `{ users, total, page, limit, totalPages }`; each user carries `walletAddress` and, signed in, the follow relation                                                                             |
+| `GET`  | `/users/:userId/stats`                 | optional | Trading stats (below)                                                                                                                                                                                         |
+
+`limit` on search is 1–50 (default 10). Search is rate limited per caller (40 a minute, 1,000 a day).
+
+### Stats
+
+`GET /users/:userId/stats` returns:
+
+| Field            | Meaning                                                           |
+| ---------------- | ----------------------------------------------------------------- |
+| `tradesCount`    | Swaps made on DIM (buys plus sells)                               |
+| `tradeVolumeUsd` | Sum of every trade's USD value                                    |
+| `realizedPnlUsd` | Realized trading result in USD, average cost                      |
+| `referralEarned` | Referral rewards earned, pending and claimed, in USDC minor units |
+| `totalFeesPaid`  | Legacy counter, stays zero                                        |
+
+`gamesPlayed`, `wins`, `losses`, `totalEarned`, `totalLost`, `chessElo` and `points` are legacy counters from an earlier version of the product; they are still served and stay at their defaults. Perps results are not in this read: see the PnL chart, leaderboards and trade pages in [Trades and PnL](/guides/trades) and [Perps](/guides/perps).
+
+Money in the API is integer base units: `referralEarned` is USDC minor units; the `...Usd` fields are plain USD numbers.
+
+## Username
+
+Your username is your public handle (`https://dim.cool/app/u/<username>`) and your referral code.
+
+- 3–20 characters: letters, numbers and underscores (`^[a-zA-Z0-9_]{3,20}$`).
+- Unique, case-insensitive. Some names are reserved, and names that look like a domain are refused.
+
+| Method  | Endpoint                                 | Notes                                                                                                                           |
+| ------- | ---------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------- |
+| `GET`   | `/users/username/availability?username=` | `{ valid, available, reason? }` with `reason` `invalid_format`, `taken`, `reserved` or `blocked_domain`. Signed in; 30 a minute |
+| `PATCH` | `/users/me/username`                     | `{ username }`. 409 when taken; 6 a minute                                                                                      |
+
+```typescript
+const check = await sdk.users.isUsernameAvailable('myname');
+if (check.valid && check.available) {
+  const me = await sdk.users.updateUsername('myname');
+}
+```
+
+## Profile fields and images
+
+`PATCH /users/me/profile` takes any of:
+
+| Field       | Rule                                                                                                             |
+| ----------- | ---------------------------------------------------------------------------------------------------------------- |
+| `bio`       | Up to 500 characters                                                                                             |
+| `username`  | Same rules as above                                                                                              |
+| `onboarded` | `true` records the web app's first-visit tour as finished or skipped (`onboardedAt`); `false` makes it due again |
+
+Images are multipart uploads with one `file` field: JPEG, PNG, WebP or GIF, up to 5 MB.
+
+| Method   | Endpoint                   | Purpose                |
+| -------- | -------------------------- | ---------------------- |
+| `POST`   | `/users/me/profile/avatar` | Set the avatar         |
+| `POST`   | `/users/me/profile/cover`  | Set the cover image    |
+| `DELETE` | `/users/me/profile/avatar` | Remove the avatar      |
+| `DELETE` | `/users/me/profile/cover`  | Remove the cover image |
+
+Uploads are limited to 10 an hour per user.
+
+```typescript
+await sdk.users.updateProfile({ bio: 'perps and memes', onboarded: true });
+await sdk.users.uploadAvatar(file); // a File, or { data, mimeType, filename } in Node
+await sdk.users.uploadCoverImage(file);
+await sdk.users.removeAvatar();
+await sdk.users.removeCoverImage();
+```
+
+## Wallets linked to the account
+
+An account is a set of proven wallets, Solana and EVM: any of them signs in to the same account, and `primary` marks the one money moves through on each chain. A wallet is linked by signing a message with it.
+
+| Method   | Endpoint                       | Notes                                                                                                          |
+| -------- | ------------------------------ | -------------------------------------------------------------------------------------------------------------- |
+| `GET`    | `/wallets/me/linked`           | `[{ id, chain: 'solana' \| 'evm', address, source, primary, createdAt }]`                                      |
+| `POST`   | `/wallets/me/linked/challenge` | `{ chain, address }` → `{ message, nonce, expiresInSeconds }`: the message to sign, valid for two minutes      |
+| `POST`   | `/wallets/me/linked`           | `{ chain, address, signature }` (Solana: ed25519 in base64; EVM: `personal_sign` 0x hex). Answers the new list |
+| `DELETE` | `/wallets/me/linked/:walletId` | Never the money wallet, never the last one. Answers the new list                                               |
+
+A wallet that belongs to another account is refused (`wallet-taken`). The three write routes are limited to 10 a minute.
+
+```typescript
+const wallets = await sdk.walletLinks.list();
+await sdk.walletLinks.linkWith('solana', address, (message) =>
+  signer.signMessage(message),
+);
+// or: challenge(chain, address) then link(chain, address, signature)
+await sdk.walletLinks.unlink(walletId);
+```
+
+MCP: `dim_list_wallets`, and `dim_link_wallet { chain, address, signature? }` (without a signature it returns the message to sign as `needsSigning`; with a configured EVM key it signs by itself). Deposit addresses per network are in [Funding](/guides/funding).
+
+## Notifications
+
+Notifications are the things that happened to you: a new follower, a referral reward paid out, money received, perps events. They are stored and pushed.
+
+| Method   | Endpoint                      | Returns                                                                          |
+| -------- | ----------------------------- | -------------------------------------------------------------------------------- |
+| `GET`    | `/notifications?page=&limit=` | `{ notifications, total, page, limit, unreadCount }`; `limit` 1–100 (default 20) |
+| `PATCH`  | `/notifications/read-all`     | Marks every notification read                                                    |
+| `PATCH`  | `/notifications/:id/read`     | Marks one read; answers it                                                       |
+| `DELETE` | `/notifications/:id`          | Dismisses one                                                                    |
+
+A notification is `{ id, type, title, message, read, fromUserId?, fromUsername?, avatar?, actionPayload?, createdAt }`. The socket pushes each new one to its owner as a `notification` event with the same shape, so a connected client renders it without another read.
+
+```typescript
+const page = await sdk.notifications.list({ page: 1, limit: 20 });
+await sdk.notifications.markAsRead(id);
+await sdk.notifications.markAllAsRead();
+await sdk.notifications.dismiss(id);
+
+sdk.wsTransport.connect();
+sdk.events.subscribe('notification', (event) =>
+  console.log(event.title, event.message),
+);
+```
+
+For agents, `dim_check_notifications` reads the unread ones in one call and `dim_get_pending_events` drains the real-time events buffered since the last call (notifications, perps account and position updates, moves in and out of perps).
+
+## MCP
+
+| Tool                                 | Purpose                                                            |
+| ------------------------------------ | ------------------------------------------------------------------ |
+| `dim_get_profile`                    | Your profile: username, avatar, bio and your DIM wallet address    |
+| `dim_set_username`                   | `{ username }`                                                     |
+| `dim_set_bio`                        | `{ bio }`, up to 500 characters                                    |
+| `dim_upload_avatar`                  | `{ filePath? \| imageUrl? }`                                       |
+| `dim_upload_cover_image`             | `{ filePath? \| imageUrl? }`                                       |
+| `dim_remove_avatar`                  | Reset the avatar                                                   |
+| `dim_remove_cover_image`             | Reset the cover image                                              |
+| `dim_get_profile_image_requirements` | Max dimensions, size, aspect ratio and MIME types before uploading |
+| `dim_search_users`                   | `{ query, limit? }`                                                |
+| `dim_list_wallets`                   | The wallets of the account                                         |
+| `dim_link_wallet`                    | `{ chain, address, signature? }`                                   |
+| `dim_check_notifications`            | Unread notifications                                               |
+| `dim_get_pending_events`             | Buffered real-time events since the last call                      |
+
+See the [MCP tools reference](/mcp/tools).
+
+## REST
+
+| Method   | Endpoint                       | Auth     | Purpose                           |
+| -------- | ------------------------------ | -------- | --------------------------------- |
+| `GET`    | `/users/:id`                   | optional | A public profile by id            |
+| `GET`    | `/users/username/:username`    | optional | A public profile by username      |
+| `GET`    | `/users/search`                | optional | `username`, `page`, `limit`       |
+| `GET`    | `/users/:userId/stats`         | optional | Trading stats                     |
+| `GET`    | `/users/username/availability` | user     | `username`                        |
+| `PATCH`  | `/users/me/username`           | user     | `{ username }`                    |
+| `PATCH`  | `/users/me/profile`            | user     | `{ bio?, username?, onboarded? }` |
+| `POST`   | `/users/me/profile/avatar`     | user     | multipart `file`                  |
+| `POST`   | `/users/me/profile/cover`      | user     | multipart `file`                  |
+| `DELETE` | `/users/me/profile/avatar`     | user     |                                   |
+| `DELETE` | `/users/me/profile/cover`      | user     |                                   |
+| `GET`    | `/wallets/me/linked`           | user     | The account's wallets             |
+| `POST`   | `/wallets/me/linked/challenge` | user     | `{ chain, address }`              |
+| `POST`   | `/wallets/me/linked`           | user     | `{ chain, address, signature }`   |
+| `DELETE` | `/wallets/me/linked/:walletId` | user     |                                   |
+| `GET`    | `/notifications`               | user     | `page`, `limit`                   |
+| `PATCH`  | `/notifications/read-all`      | user     |                                   |
+| `PATCH`  | `/notifications/:id/read`      | user     |                                   |
+| `DELETE` | `/notifications/:id`           | user     |                                   |
+
+Related: [Follows](/guides/follows) for the graph behind `followersCount`, [Referral rewards](/guides/referrals) for your code and link, [Sends and withdrawals](/guides/sends) for moving money from the account's wallets.

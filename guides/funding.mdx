@@ -1,0 +1,227 @@
+---
+title: 'Funding: deposits and bridging'
+description: 'One USD balance over your Solana wallet, your EVM wallet on Arbitrum, Base and Monad, and your perps account. Where to deposit, how a move into or out of perps works, its steps and states, resume, fees and minimums, and the SDK, MCP and REST surfaces.'
+---
+
+## The balance
+
+Your money on DIM sits in places you own:
+
+- your **Solana wallet**;
+- your **EVM wallet**, one address on Arbitrum, Base and Monad;
+- your **perps account** on Hyperliquid, which is that same EVM address.
+
+DIM adds these up into one figure in US dollars and routes money between them. It never pools your money with anyone else's.
+
+`GET /wallets/me/balances` returns:
+
+| Field         | Meaning                                                                    |
+| ------------- | -------------------------------------------------------------------------- |
+| `total`       | `available + inPerps + moving`                                             |
+| `available`   | In your wallets, on every network                                          |
+| `inPerps`     | Equity in your perps account                                               |
+| `moving`      | Money in a move between two places right now                               |
+| `home`        | Your home network (see below)                                              |
+| `locations`   | Each holding: `network`, `asset`, `amount` (base units), `decimals`, `usd` |
+| `unavailable` | Places that could not be read this time. Their money is not in `total`     |
+| `updatedAt`   | ms since the epoch                                                         |
+
+Money in the API is integer base units: USD values are USDC minor units (6 decimals) as decimal strings, and every `amount` is in the base units of its own asset (lamports, wei, USDC minor units). SOL, ETH and MON count at their market value. They are converted only when you move them into perps, never in the background.
+
+## Networks and assets
+
+| Network  | Accepted assets | Decimals       | Relay chain id |
+| -------- | --------------- | -------------- | -------------- |
+| Solana   | SOL, USDC       | SOL 9, USDC 6  | 792703809      |
+| Arbitrum | ETH, USDC       | ETH 18, USDC 6 | 42161          |
+| Base     | ETH, USDC       | ETH 18, USDC 6 | 8453           |
+| Monad    | MON, USDC       | MON 18, USDC 6 | 143            |
+
+Monad's gas token is MON, not ETH. The EVM address is the same on Arbitrum, Base and Monad. The operator can switch a network off; a network that is off is listed under `unavailable`.
+
+## Deposits and the home network
+
+`GET /wallets/me/deposit-info` lists your own address on each network, home network first, with the assets it accepts (`asset`, `decimals`, `native`, `contract`) and an explorer link. `address` is `null` when you have no wallet on that chain. Send only a listed asset on its listed network.
+
+Your **home** network is where deposits show first, and where money moved out of perps returns. Change it with `PATCH /wallets/me/funding-home { network }`. The answer is the new deposit info.
+
+```bash
+curl https://api.dim.cool/wallets/me/deposit-info \
+  -H "Authorization: Bearer $DIM_TOKEN"
+
+curl -X PATCH https://api.dim.cool/wallets/me/funding-home \
+  -H "Authorization: Bearer $DIM_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"network":"base"}'
+```
+
+## Moving money into perps
+
+A move in starts from any balance in the table above. The default is Solana USDC. The amount is in **base units of the origin asset**: `500000000` is 0.5 SOL and `20000000` is 20 USDC.
+
+1. **Quote (optional).** `POST /perps/transfers/quote { direction: 'in', amount, network?, asset? }` shows what leaves (`from`), what arrives (`receive`, USDC minor units), the `fee`, the usual time (`etaSeconds`), the `minimum` and the `steps`. A quote below the minimum comes back with `reject: 'min-deposit'`. When Relay cannot route the move, the request fails with `route-unavailable`. Nothing is written.
+2. **Start.** `POST /perps/transfers/in { amount, network?, asset?, idempotencyKey? }`. The same `idempotencyKey` (8–64 characters, `[A-Za-z0-9_-]`) never starts a second move. The server asks Relay for a quote, stores Relay's `requestId`, and sets the recipient to your own perps account. The client never chooses the recipient. The answer is a move in state `signing`, with a `sign` object:
+   - `solanaTransaction`: a legacy Solana transaction, base64. DIM has already paid the network fee.
+   - `evmTransactions`: transactions to send in order, `{ to, data, value, chainId }`. For USDC: an `approve`, then the deposit. For ETH or MON: the deposit only.
+   - `transferId`, `legIndex`, `network` and `expiresAt`. A move not signed in time is dropped (`expired`).
+3. **Sign.** Your wallet signs. On the web, the Solana signer signs Solana moves, and the Privy embedded EVM wallet sends EVM moves with sponsored gas. If you use your own keys, you sign the unsigned transactions yourself.
+4. **Submit.** `POST /perps/transfers/:id/legs/:index/submit` with one of:
+   - `signedTransaction`: Solana, sign-only wallets. DIM checks it is exactly the transaction prepared and sends it.
+   - `signature`: Solana, wallets that broadcast it themselves.
+   - `txHashes`: EVM, every hash in order (up to 4).
+5. **Follow.** Relay swaps and bridges in one route. The server polls Relay and credits your perps account. `GET /perps/transfers/:id` and the `perps:transfer:updated` socket event carry the move as it stands. `GET /perps/transfers` lists all of yours.
+
+While the wallet step is open (`state: 'signing'`, before `sign.expiresAt`) the owner's reads still carry `sign`, so a wallet that refused or hung is simply asked again. Starting a second move meanwhile is refused with `action-in-flight`: sign the first one again instead.
+
+Your first move in also completes the Hyperliquid approvals for your account. There is no separate "turn on" step after it.
+
+```bash
+curl -X POST https://api.dim.cool/perps/transfers/in \
+  -H "Authorization: Bearer $DIM_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"amount":"20000000","network":"solana","asset":"USDC","idempotencyKey":"move-2026-11-05-a"}'
+# → { id, state: 'signing', sign: { transferId, legIndex: 0, network: 'solana', solanaTransaction, expiresAt }, steps, ... }
+
+curl -X POST https://api.dim.cool/perps/transfers/$ID/legs/0/submit \
+  -H "Authorization: Bearer $DIM_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"signedTransaction":"<base64>"}'
+```
+
+## Moving money out of perps
+
+A move out returns **USDC to your home network**. The amount is USD in USDC minor units. It must fit in your account's `withdrawable`.
+
+1. `POST /perps/transfers/quote { direction: 'out', amount }` previews it (optional). A refusal is `reject`: `min-withdraw` or `insufficient`.
+2. `POST /perps/transfers/out { amount, idempotencyKey? }` starts it. DIM signs every step through your session signer. You sign nothing.
+3. Hyperliquid withdraws to **your own Arbitrum address**. The venue only pays out to the account's own address, and that usually takes a few minutes.
+4. Unless your home is Arbitrum, Relay carries the USDC from Arbitrum to your home network. Before signing, the server checks that the quote pays your own address.
+
+## Steps
+
+Every surface shows the same steps (`steps` on a move or a quote):
+
+| `key`      | What it says                       |
+| ---------- | ---------------------------------- |
+| `sign`     | Approve in your wallet             |
+| `sent`     | Sent from `network`                |
+| `bridge`   | Swapping and bridging to `network` |
+| `credited` | In perps                           |
+| `withdraw` | Leaving perps                      |
+| `arbitrum` | Arrived on Arbitrum                |
+| `home`     | In your wallet on `network`        |
+
+Each step has a `status` (`todo`, `now`, `done`, `failed` or `refunded`), the `network`, `asset` and `amount` with its `decimals`, and, when known, `txHash`, `explorerUrl`, `startedAt`, `doneAt` and `etaSeconds`. A move in shows `sign`, `sent`, `bridge`, `credited`. A move out shows `withdraw`, `arbitrum` and, unless home is Arbitrum, `bridge`, `home`.
+
+## States
+
+| `state`    | Meaning                                                                                         |
+| ---------- | ----------------------------------------------------------------------------------------------- |
+| `signing`  | Waiting for your wallet                                                                         |
+| `moving`   | Under way                                                                                       |
+| `done`     | Credited where it was going                                                                     |
+| `refunded` | No solver filled it, so Relay sent the money back to where it started                           |
+| `resting`  | Stopped part way, with the money in your own wallet (`resting` says where). `canResume` is true |
+| `stuck`    | Past its deadline. DIM is looking at it, and nothing more is sent while it may still land       |
+| `failed`   | Nothing left the origin                                                                         |
+
+The older `status` field (`pending`, `done`, `failed`) is still served.
+
+Every move is a chain of **legs**. A leg starts only after the previous one is confirmed. Each leg ends where you own the money: your Solana wallet, your EVM wallet, or your perps account. The external id of a leg (Relay's `requestId`, a transaction hash, the Hyperliquid nonce) is stored before anything is sent. You can have **one move in flight** at a time.
+
+Every change to a move is pushed to its owner as `perps:transfer:updated` on the socket (the `user:<id>` room, joined on connect), with the move in the same shape as `GET /perps/transfers/:id`.
+
+## Resume
+
+A move out whose USDC reached Arbitrum but did not get home stops in state `resting`, with `canResume: true`. `POST /perps/transfers/:id/resume` quotes only the legs that are left and continues. A move in that failed never left your wallet, or Relay refunded it, so there is nothing to resume: start it again.
+
+## Fees and minimums
+
+- **Pass-through.** The fees are Relay's route fee and, on a move out, the venue's withdrawal fee of **1 USDC**. Both are shown in the quote and on the move (`fee`). DIM adds nothing. Moves record no platform fee and pay no referral rewards.
+- **Minimums.** **$10** of USD value in (`minDeposit`). **$5** out (`minWithdraw`), and the amount must be more than the $1 venue fee. Both are served in `GET /perps/status` `rules`.
+- Each move is quoted fresh. Relay's routes, fees and minimums can change without notice.
+
+If Relay is down, or cannot route a move, quoting answers `route-unavailable` and nothing starts. Moves already under way keep being polled. Positions are not affected.
+
+<Note>
+  A development server running the `fake` funding provider, or the synthetic
+  venue, completes moves instantly without Relay or a wallet signature. Nothing
+  else about the shapes changes.
+</Note>
+
+## Errors
+
+| Code / SDK reason   | Meaning                                                                   |
+| ------------------- | ------------------------------------------------------------------------- |
+| `min-deposit`       | Below the minimum move in                                                 |
+| `min-withdraw`      | Below the minimum move out, or not more than the venue's $1 fee           |
+| `insufficient`      | A move out larger than `withdrawable`                                     |
+| `route-unavailable` | Relay cannot route this move right now. Nothing started                   |
+| `action-in-flight`  | Another move of yours is under way                                        |
+| `expired`           | Not signed in time. Start again                                           |
+| `signature-invalid` | The signed transaction is not the one prepared, or is missing a signature |
+| `origin-failed`     | The origin transaction failed on chain. Nothing moved                     |
+| `not-resumable`     | The move has no `canResume`                                               |
+| `unsupported-asset` | That asset is not accepted on that network                                |
+
+## REST
+
+| Method | Path                                      | Purpose                                                          |
+| ------ | ----------------------------------------- | ---------------------------------------------------------------- |
+| GET    | `/wallets/me/balances`                    | The unified balance                                              |
+| GET    | `/wallets/me/deposit-info`                | Your address per network, home first, with the accepted assets   |
+| PATCH  | `/wallets/me/funding-home`                | `{ network }`: set the home network                              |
+| POST   | `/perps/transfers/quote`                  | `{ direction, amount, network?, asset? }`: preview a move        |
+| POST   | `/perps/transfers/in`                     | `{ amount, network?, asset?, idempotencyKey? }`: start a move in |
+| POST   | `/perps/transfers/out`                    | `{ amount, idempotencyKey? }`: start a move out to home          |
+| GET    | `/perps/transfers`                        | Your moves                                                       |
+| GET    | `/perps/transfers/:id`                    | One move as it stands                                            |
+| POST   | `/perps/transfers/:id/legs/:index/submit` | `{ signedTransaction }`, `{ signature }` or `{ txHashes }`       |
+| POST   | `/perps/transfers/:id/resume`             | Continue a move with `canResume`                                 |
+
+All require a signed-in user. `GET /wallets/me/balances` is rate limited per user (20 a minute, 2,000 a day).
+
+## SDK
+
+```typescript
+const balance = await sdk.wallet.getUnifiedBalance();
+const info = await sdk.wallet.getDepositInfo();
+await sdk.wallet.setFundingHome('base');
+
+const quote = await sdk.perps.quoteMove('in', '500000000', {
+  network: 'solana',
+  asset: 'SOL',
+});
+
+// The Solana signer (wallet.setSigner) signs Solana moves; EVM moves need an EVM sender
+sdk.wallet.setEvmSender(async (tx) => sendWithYourEvmWallet(tx)); // returns the hash
+const move = await sdk.perps.moveInAndSign('20000000', {
+  network: 'base',
+  asset: 'USDC',
+});
+
+await sdk.perps.transfer(move.id); // one move as it stands
+await sdk.perps.transfers(); // all of yours
+await sdk.perps.moveOut('10000000'); // $10 to home
+await sdk.perps.resumeMove(move.id); // when canResume
+```
+
+To sign somewhere else, call `sdk.perps.moveIn(...)`, sign `transfer.sign`, then call `sdk.perps.submitLeg(transferId, legIndex, { signedTransaction | signature | txHashes })`. See the [SDK README](https://github.com/dimcool/dim/tree/main/packages/sdk#moving-money-in-and-out-of-perps).
+
+## MCP
+
+| Tool                              | Purpose                                                                                               |
+| --------------------------------- | ----------------------------------------------------------------------------------------------------- |
+| `dim_get_balances`                | The unified balance, formatted in USD                                                                 |
+| `dim_get_deposit_info`            | Your address per network and the accepted assets                                                      |
+| `dim_set_funding_home`            | `{ network }`                                                                                         |
+| `dim_quote_perps_move`            | `{ direction, amount?, amountUsd?, network?, asset? }`                                                |
+| `dim_move_to_perps`               | `{ amount?, amountUsd?, network?, asset?, idempotencyKey? }`: amounts in units of the asset (0.5 SOL) |
+| `dim_withdraw_from_perps`         | `{ amountUsd, idempotencyKey? }`: to home                                                             |
+| `dim_get_perps_move`              | `{ transferId }`: state and each step as a readable line                                              |
+| `dim_submit_perps_move_signature` | `{ transferId, legIndex, signedTransaction?, signature?, txHashes? }`                                 |
+| `dim_resume_perps_move`           | `{ transferId }`                                                                                      |
+
+With a Solana keypair configured, `dim_move_to_perps` signs a Solana move itself. A move from Arbitrum, Base or Monad, or any move in external-signer mode, returns `{ needsSigning: true, unsignedTx, confirmWith: { tool: 'dim_submit_perps_move_signature', params: { transferId, legIndex } } }`. Here `unsignedTx` is the Solana transaction (base64) or the list of EVM transactions. Moves in count against the agent's daily spend limit, at their USD value. See the [MCP tools reference](/mcp/tools#funding).
+
+Sends and withdrawals leave from the same wallets on the same four networks: see [Sends and withdrawals](/guides/sends). Trading itself is in [Perps](/guides/perps).
